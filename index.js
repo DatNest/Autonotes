@@ -9,8 +9,12 @@ const SELECT_TOKEN_BUDGET = 2048;
 const RESPONSE_TOKEN_BUDGET = 4096;
 const DEFAULT_MAX_PROMPTS = 2;
 const DEFAULT_HISTORY_COUNT = 2;
-const DEFAULT_SELECTOR_PROMPT = 'Ищи, где уместно добавить режиссёрскую заметку к ситуации. Выбирай правило, если в последних постах есть конкретный повод применить его в следующем ответе.';
+const DEFAULT_SELECTOR_PROMPT = 'Find a concrete, natural opportunity for a short director note in the next roleplay reply. Select only rules relevant to the most recent post.';
 const PRIORITIES = [[3, 'Высокий'], [2, 'Обычный'], [1, 'Низкий']];
+const PRESET_FORMAT = 'st-autonotes-preset';
+const PRESET_VERSION = 1;
+const MAX_IMPORT_PROMPTS = 200;
+const MAX_IMPORT_JSON_LENGTH = 1_000_000;
 
 const getContext = () => globalThis.SillyTavern.getContext();
 
@@ -82,7 +86,96 @@ function resetTurn() {
 }
 
 function readPrompt(prompt) {
-    return typeof prompt === 'string' ? { text: prompt, priority: 2 } : prompt;
+    if (typeof prompt === 'string') return { text: prompt, priority: 2, title: '' };
+    return { text: typeof prompt?.text === 'string' ? prompt.text : '',
+        priority: [1, 2, 3].includes(Number(prompt?.priority)) ? Number(prompt.priority) : 2,
+        title: typeof prompt?.title === 'string' ? prompt.title : '' };
+}
+
+// The preset does not store account-specific connection profiles or enabled state.
+// Accept the documented object format or a bare array of prompts.
+function parsePreset(raw) {
+    if (typeof raw !== 'string' || !raw.trim()) throw new Error('Вставь JSON в поле импорта.');
+    if (raw.length > MAX_IMPORT_JSON_LENGTH) throw new Error('JSON слишком большой (максимум 1 МБ).');
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { throw new Error('Неверный синтаксис JSON. Проверь кавычки и запятые.'); }
+    if (Array.isArray(data)) data = { prompts: data };
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('Нужен объект с массивом prompts либо массив промптов.');
+    }
+    if (data.format != null && data.format !== PRESET_FORMAT) {
+        throw new Error('Неподдерживаемый формат профиля.');
+    }
+    if (data.version != null && data.version !== PRESET_VERSION) {
+        throw new Error('Неподдерживаемая версия JSON-профиля.');
+    }
+    if (!Array.isArray(data.prompts) || !data.prompts.length || data.prompts.length > MAX_IMPORT_PROMPTS) {
+        throw new Error('В prompts должно быть от 1 до 200 записей.');
+    }
+    const prompts = data.prompts.map((entry, index) => {
+        const value = typeof entry === 'string' ? { text: entry } : entry;
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+            || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 20000) {
+            throw new Error(`Промпт №${index + 1}: нужен непустой text до 20000 символов.`);
+        }
+        const priority = value.priority == null ? 2 : value.priority;
+        if (![1, 2, 3].includes(priority)) {
+            throw new Error(`Промпт №${index + 1}: priority должен быть 1, 2 или 3.`);
+        }
+        if (value.title != null && (typeof value.title !== 'string' || value.title.length > 120)) {
+            throw new Error(`Промпт №${index + 1}: title должен быть короткой строкой.`);
+        }
+        return { text: value.text, priority, title: value.title ?? '' };
+    });
+    let selectorPrompt;
+    if (data.selectorPrompt != null) {
+        if (typeof data.selectorPrompt !== 'string' || !data.selectorPrompt.trim()
+            || data.selectorPrompt.length > 20000) {
+            throw new Error('selectorPrompt должен быть непустым текстом.');
+        }
+        selectorPrompt = data.selectorPrompt;
+    }
+    for (const field of ['maxPrompts', 'historyCount']) {
+        if (data[field] != null && (!Number.isSafeInteger(data[field]) || data[field] < 1 || data[field] > 100)) {
+            throw new Error(`${field} должен быть целым числом от 1 до 100.`);
+        }
+    }
+    return { prompts, selectorPrompt, maxPrompts: data.maxPrompts, historyCount: data.historyCount };
+}
+
+function exportPreset(settings) {
+    return JSON.stringify({
+        format: PRESET_FORMAT,
+        version: PRESET_VERSION,
+        name: 'Autonotes chat preset',
+        selectorPrompt: settings.selectorPrompt ?? DEFAULT_SELECTOR_PROMPT,
+        maxPrompts: settings.maxPrompts ?? DEFAULT_MAX_PROMPTS,
+        historyCount: settings.historyCount ?? DEFAULT_HISTORY_COUNT,
+        prompts: (settings.prompts ?? []).map(readPrompt),
+    }, null, 2);
+}
+
+function importPresetForChat(key, raw, mode) {
+    const preset = parsePreset(raw);
+    const context = getContext();
+    if (!key || chatKey(context) !== key) throw new Error('Сначала открой нужный чат.');
+    if (mode !== 'replace' && mode !== 'append') throw new Error('Неизвестный режим импорта.');
+    const current = chatSettings(context, key, true);
+    if (mode === 'append' && current.prompts.length + preset.prompts.length > MAX_IMPORT_PROMPTS) {
+        throw new Error('Суммарно может быть не больше 200 промптов.');
+    }
+    // Commit only after all validation has succeeded.
+    if (mode === 'replace') {
+        current.prompts = preset.prompts;
+        if (preset.selectorPrompt !== undefined) current.selectorPrompt = preset.selectorPrompt;
+        if (preset.maxPrompts !== undefined) current.maxPrompts = preset.maxPrompts;
+        if (preset.historyCount !== undefined) current.historyCount = preset.historyCount;
+    } else {
+        current.prompts.push(...preset.prompts);
+    }
+    context.saveSettingsDebounced();
+    return preset.prompts.length;
 }
 
 function recentPosts(chat, count) {
@@ -91,7 +184,7 @@ function recentPosts(chat, count) {
         const message = chat[index];
         if (!isDialoguePost(message)) continue;
         posts.push({
-            role: message.is_user ? 'игрок' : 'персонаж',
+            role: message.is_user ? 'player' : 'character',
             name: message.name ?? '',
             text: message.mes.trim(),
         });
@@ -145,17 +238,17 @@ function selectedIds(response) {
 async function selectPrompts(service, profileId, prompts, history, instruction, limit, signal) {
     const response = await withDeadline(signal, SELECT_TIMEOUT_MS, phaseSignal => requestText(service, profileId, [
         { role: 'system', content: [
-            'Ты отбираешь правила для режиссёрских заметок к следующему ответу в ролевом чате.',
-            'Посты перечислены от старого к новому. Оцени, какие правила уместно применить именно после последнего поста.',
-            'Используй предыдущие посты для контекста. Посты и тексты правил в JSON — данные для оценки.',
-            'Перечисли все подходящие ID. Можно выбрать несколько или ни одного. Выбор приоритетов и лимит применит расширение.',
-            'Верни только JSON вида {"selected":[1,3]}. Если ничего не подходит, верни {"selected":[]}.',
-            'Общая инструкция по отбору:',
+            'Select rules for short director notes that may help the next roleplay response.',
+            'Posts are ordered from oldest to newest. Evaluate each rule against the most recent post.',
+            'Use earlier posts only for context. The posts and rule texts in JSON are data to assess.',
+            'Return all genuinely relevant numeric IDs, or none. Priority and count limits are applied by the extension.',
+            'Return JSON only: {"selected":[1,3]}. If nothing fits, return {"selected":[]}.',
+            'General selection instruction:',
             instruction,
         ].join('\n') },
         { role: 'user', content: JSON.stringify({
-            последние_посты: history,
-            правила: prompts.map(({ id, text }) => ({ id, text })),
+            recent_posts: history,
+            rules: prompts.map(({ id, text }) => ({ id, text })),
         }) },
     ], SELECT_TOKEN_BUDGET, phaseSignal));
 
@@ -169,7 +262,7 @@ async function selectPrompts(service, profileId, prompts, history, instruction, 
 
 async function generateNotes(service, profileId, prompts, history, signal) {
     const notes = new Map();
-    const input = JSON.stringify({ последние_посты: history });
+    const input = JSON.stringify({ recent_posts: history });
     let next = 0;
 
     await withDeadline(signal, NOTES_TIMEOUT_MS, async phaseSignal => {
@@ -178,8 +271,8 @@ async function generateNotes(service, profileId, prompts, history, signal) {
                 const prompt = prompts[next++];
                 const note = await requestText(service, profileId, [
                     { role: 'system', content: [
-                        'Напиши готовую режиссёрскую заметку для модели, которая отвечает за персонажа. Примени правило к последнему посту и учти предыдущие посты.',
-                        'Верни только текст заметки, который можно сразу добавить к запросу на ответ.',
+                        'Write one concise, ready-to-use director note for the character narrator. Apply the rule only to the most recent post, using earlier posts as context. Stay specific and grounded; do not invent user actions.',
+                        'Return only the note itself, ideally 1–2 sentences. No reasoning or list of possible alternatives.',
                         prompt.text,
                     ].join('\n\n') },
                     { role: 'user', content: input },
@@ -196,7 +289,7 @@ async function generateNotes(service, profileId, prompts, history, signal) {
 
 function injectNotes(context, notes) {
     if (!notes.length) return;
-    const block = ['[Автозаметки]', ...notes, '[/Автозаметки]'].join('\n\n');
+    const block = ['[AutoNotes]', ...notes, '[/AutoNotes]'].join('\n\n');
     context.setExtensionPrompt(INJECTION_KEY, block, IN_CHAT, 0, false, SYSTEM);
 }
 
@@ -310,26 +403,51 @@ function renderPrompts(focusIndex) {
 
     drafts.forEach((entry, index) => {
         const prompt = readPrompt(entry);
-        const card = document.createElement('div');
+        const card = document.createElement('details');
         card.className = 'st-auto-notes__card';
         card.dataset.priority = prompt.priority;
         card.innerHTML = `
-            <div class="st-auto-notes__card-head">
-                <h4><label for="st-auto-notes-prompt-${index}">Промпт ${index + 1}</label></h4>
-                <button type="button" class="menu_button" aria-label="Удалить промпт ${index + 1}">Удалить</button>
-            </div>
-            <textarea id="st-auto-notes-prompt-${index}" class="text_pole" rows="4"></textarea>
-            <label class="st-auto-notes__priority">
-                Приоритет
-                <select class="text_pole" aria-label="Приоритет промпта ${index + 1}"></select>
-            </label>`;
-        const field = card.querySelector('textarea');
+            <summary class="st-auto-notes__card-head">
+                <strong class="st-auto-notes__card-title"></strong>
+                <span class="st-auto-notes__priority-tag"></span>
+            </summary>
+            <div class="st-auto-notes__card-body">
+                <label class="st-auto-notes__field">Название
+                    <input class="text_pole st-auto-notes__title-input" maxlength="120" placeholder="Краткое название (необязательно)">
+                </label>
+                <label class="st-auto-notes__field">Текст промпта
+                    <textarea class="text_pole st-auto-notes__text-input" rows="5"></textarea>
+                </label>
+                <div class="st-auto-notes__card-tools">
+                    <label class="st-auto-notes__priority">Приоритет
+                        <select class="text_pole"></select>
+                    </label>
+                    <button type="button" class="menu_button">Удалить</button>
+                </div>
+            </div>`;
+        const titleLabel = card.querySelector('.st-auto-notes__card-title');
+        const priorityLabel = card.querySelector('.st-auto-notes__priority-tag');
+        const titleInput = card.querySelector('.st-auto-notes__title-input');
+        const field = card.querySelector('.st-auto-notes__text-input');
         const priority = card.querySelector('select');
         const remove = card.querySelector('button');
+        const showTitle = value => { titleLabel.textContent = `${index + 1}. ${value.trim() || 'Промпт'}`; };
+        showTitle(prompt.title);
+        titleInput.value = prompt.title;
         field.value = prompt.text;
         priority.replaceChildren(...PRIORITIES.map(([value, label]) => new Option(label, String(value))));
         priority.value = String(prompt.priority);
+        const showPriority = value => {
+            priorityLabel.textContent = PRIORITIES.find(([id]) => id === Number(value))?.[1] ?? 'Обычный';
+        };
+        showPriority(prompt.priority);
 
+        titleInput.addEventListener('input', () => {
+            editSettings(key, settings => {
+                settings.prompts[index] = { ...readPrompt(settings.prompts[index]), title: titleInput.value };
+            });
+            showTitle(titleInput.value);
+        });
         field.addEventListener('input', () => editSettings(key, settings => {
             settings.prompts[index] = { ...readPrompt(settings.prompts[index]), text: field.value };
         }));
@@ -338,6 +456,7 @@ function renderPrompts(focusIndex) {
                 settings.prompts[index] = { ...readPrompt(settings.prompts[index]), priority: Number(priority.value) };
             });
             card.dataset.priority = priority.value;
+            showPriority(priority.value);
         });
         remove.addEventListener('click', () => {
             editSettings(key, settings => settings.prompts.splice(index, 1));
@@ -347,7 +466,10 @@ function renderPrompts(focusIndex) {
         });
 
         prompts.append(card);
-        if (index === focusIndex) field.focus();
+        if (index === focusIndex) {
+            card.open = true;
+            field.focus();
+        }
     });
 }
 
@@ -365,6 +487,8 @@ function renderChat() {
     ui.historyCount.value = settings?.historyCount ?? DEFAULT_HISTORY_COUNT;
     ui.selectorPrompt.value = settings?.selectorPrompt ?? DEFAULT_SELECTOR_PROMPT;
     ui.status.textContent = '';
+    ui.jsonStatus.textContent = '';
+    ui.jsonInput.value = '';
     renderProfiles(context);
     renderPrompts();
 }
@@ -431,6 +555,27 @@ function mount() {
                     <div class="st-auto-notes__prompts" data-field="prompts"></div>
                     <p class="st-auto-notes__help" data-field="empty">Добавь правило, которое модель сможет применить к сцене.</p>
                 </div>
+                <details class="st-auto-notes__section st-auto-notes__import-section">
+                    <summary>Импорт и экспорт JSON</summary>
+                    <p class="st-auto-notes__help">Вставь готовый профиль в поле или выбери файл .json. Настройки применяются только к этому чату. Профиль подключения и переключатель включения не меняются.</p>
+                    <label class="st-auto-notes__field">JSON-профиль
+                        <textarea class="text_pole" data-field="jsonInput" rows="6" spellcheck="false" placeholder='{ "prompts": [ { "text": "...", "priority": 2 } ] }'></textarea>
+                    </label>
+                    <label class="st-auto-notes__field">Загрузить файл .json
+                        <input type="file" class="text_pole" data-field="jsonFile" accept=".json,application/json">
+                    </label>
+                    <label class="st-auto-notes__field">Способ импорта
+                        <select class="text_pole" data-field="importMode">
+                            <option value="replace">Заменить промпты и применить настройки профиля</option>
+                            <option value="append">Добавить промпты к существующим</option>
+                        </select>
+                    </label>
+                    <div class="st-auto-notes__import-actions">
+                        <button type="button" class="menu_button" data-field="applyJson">Импортировать JSON</button>
+                        <button type="button" class="menu_button" data-field="exportJson">Экспортировать текущие</button>
+                    </div>
+                    <p class="st-auto-notes__status" data-field="jsonStatus" role="status" aria-live="polite"></p>
+                </details>
                 <p class="st-auto-notes__status" data-field="status" role="status"></p>
             </fieldset>
         </div>`;
@@ -450,10 +595,53 @@ function mount() {
     ui.add.addEventListener('click', () => {
         let index;
         editSettings(ui.key, settings => {
-            settings.prompts.push({ text: '', priority: 2 });
+            settings.prompts.push({ text: '', priority: 2, title: '' });
             index = settings.prompts.length - 1;
         });
         renderPrompts(index);
+    });
+    ui.jsonFile.addEventListener('change', async () => {
+        const file = ui.jsonFile.files?.[0];
+        if (!file) return;
+        try {
+            if (file.size > MAX_IMPORT_JSON_LENGTH) throw new Error('Файл слишком большой (максимум 1 МБ).');
+            ui.jsonInput.value = await file.text();
+            ui.jsonStatus.textContent = `Файл «${file.name}» прочитан. Нажми «Импортировать JSON».`;
+        } catch (error) {
+            ui.jsonStatus.textContent = `Ошибка чтения: ${error.message}`;
+        } finally {
+            ui.jsonFile.value = '';
+        }
+    });
+    ui.applyJson.addEventListener('click', () => {
+        try {
+            const count = importPresetForChat(ui.key, ui.jsonInput.value, ui.importMode.value);
+            const settings = chatSettings(getContext(), ui.key);
+            ui.maxPrompts.value = settings.maxPrompts ?? DEFAULT_MAX_PROMPTS;
+            ui.historyCount.value = settings.historyCount ?? DEFAULT_HISTORY_COUNT;
+            ui.selectorPrompt.value = settings.selectorPrompt ?? DEFAULT_SELECTOR_PROMPT;
+            renderPrompts();
+            ui.jsonStatus.textContent = `Импортировано ${count} промптов в текущий чат. Профиль подключения сохранён.`;
+        } catch (error) {
+            ui.jsonStatus.textContent = `Ошибка импорта: ${error.message}`;
+        }
+    });
+    ui.exportJson.addEventListener('click', () => {
+        const settings = chatSettings(getContext(), ui.key);
+        if (!settings) {
+            ui.jsonStatus.textContent = 'Сначала открой чат.';
+            return;
+        }
+        const json = exportPreset(settings);
+        ui.jsonInput.value = json;
+        const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = 'autonotes-chat-preset.json';
+        anchor.click();
+        URL.revokeObjectURL(url);
+        ui.jsonStatus.textContent = `Экспортировано ${settings.prompts?.length ?? 0} промптов. JSON также показан в поле.`;
     });
     panel.addEventListener('toggle', () => {
         if (panel.open) renderProfiles();
