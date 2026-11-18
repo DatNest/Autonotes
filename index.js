@@ -1,13 +1,11 @@
 const SETTINGS_KEY = 'stAutoNotes';
-const EXTENSION_VERSION = '1.5.1';
+const EXTENSION_VERSION = '1.5.2';
 const UPDATE_SEEN_KEY = 'stAutoNotesUpdateSeen';
 const RELEASE_NOTES = [
-    'Все разделы закрыты после обновления страницы. Нажми на нужный заголовок, чтобы раскрыть его.',
-    'Настройки разбиты на группы: подключение, частота и контекст, отбор правил, перегенерация.',
-    'Импорт и экспорт находятся под «Добавить промпт». Карандаш ✏️ справа от тегов включает редактирование: название, цвет, порядок стрелками и удаление крестиком с подтверждением.',
-    'Добавляй теги кнопкой «+» на отдельной второй строке под лентой.',
-    'Теги расположены одной лентой. Прокручивай её колесом мыши на ПК или свайпом на телефоне.',
-    'Список промптов занимает небольшой блок примерно на пять закрытых записей. Остальные записи доступны при прокрутке внутри списка.',
+    'У каждой записи снова есть название. Заполни поле «Название» — оно будет видно и на свёрнутой карточке.',
+    'Список тегов каждой записи начинается с «+». Созданный здесь тег сразу назначается этой записи и появляется в общей ленте.',
+    'Поле «Когда срабатывает» необязательно: если оставить его пустым, векторный поиск использует текст самого промпта.',
+
 ];
 let updateNoticeOpen = false;
 const INJECTION_KEY = 'zz_st_auto_notes';
@@ -245,7 +243,8 @@ function resetTurn() {
 }
 
 function readPrompt(prompt) {
-    return typeof prompt === 'string' ? { text: prompt, priority: 2 } : prompt;
+    if (typeof prompt === 'string') return { text: prompt, priority: 2, name: '' };
+    return prompt && { ...prompt, name: prompt.name ?? prompt.title ?? '' };
 }
 
 function recentPosts(chat, count) {
@@ -833,15 +832,20 @@ function renderPrompts(focusIndex) {
                 <span class="st-auto-notes__summary-tags"></span>
             </summary>
             <div class="st-auto-notes__prompt-content">
+            <label class="st-auto-notes__field">
+                Название
+                <input type="text" class="text_pole" data-prompt-name placeholder="Например, Силы Кларка в быту">
+            </label>
             <div class="st-auto-notes__card-head">
                 <button type="button" class="menu_button" aria-label="Удалить промпт ${index + 1}">Удалить</button>
             </div>
             <label class="st-auto-notes__field st-auto-notes__trigger" ${isVector ? '' : 'hidden'}>
-                Когда срабатывает
+                Когда срабатывает · необязательно
+                <span class="st-auto-notes__help">Условие для векторного поиска. Если пусто, поиск использует текст самого промпта ниже.</span>
                 <textarea class="text_pole" rows="2" placeholder="Например, кто-то заметил проявление сил Кларка"></textarea>
             </label>
             <label class="st-auto-notes__field">
-                Что подсказать
+                Промпт для заметки
                 <textarea id="st-auto-notes-prompt-${index}" class="text_pole" rows="4"></textarea>
             </label>
             <label class="st-auto-notes__priority">
@@ -860,6 +864,16 @@ function renderPrompts(focusIndex) {
             if (card.open) openPromptIndexes.add(index);
             else openPromptIndexes.delete(index);
         });
+        const heading = card.querySelector('.st-auto-notes__prompt-heading');
+        const name = card.querySelector('[data-prompt-name]');
+        name.value = prompt.name;
+        heading.textContent = prompt.name.trim() || 'Промпт ' + (index + 1);
+        name.addEventListener('input', () => {
+            editSettings(key, settings => {
+                settings.prompts[index] = { ...readPrompt(settings.prompts[index]), name: name.value };
+            });
+            heading.textContent = name.value.trim() || 'Промпт ' + (index + 1);
+        });
         const summaryTags = card.querySelector('.st-auto-notes__summary-tags');
         for (const tag of tags.filter(tag => tagIds.includes(tag.id))) {
             const badge = document.createElement('span');
@@ -876,6 +890,13 @@ function renderPrompts(focusIndex) {
         const priority = card.querySelector('select');
         const remove = card.querySelector('button');
         const tagChoices = card.querySelector('.st-auto-notes__record-tags .st-auto-notes__tag-filters');
+        const addTag = document.createElement('button');
+        addTag.type = 'button';
+        addTag.className = 'st-auto-notes__tag-add-button';
+        addTag.textContent = '+';
+        addTag.setAttribute('aria-label', 'Создать и назначить тег этой записи');
+        addTag.addEventListener('click', () => showAddTagDialog(index));
+        tagChoices.append(addTag);
         for (const tag of tags) {
             const choice = tagButton(tag.name, null, tag.id, tag.color, () => {
                 editSettings(key, settings => {
@@ -887,12 +908,6 @@ function renderPrompts(focusIndex) {
                 ui.prompts.querySelector(`[aria-label="Теги промпта ${index + 1}"] [data-tag="${tag.id}"]`)?.focus();
             }, tagIds.includes(tag.id));
             tagChoices.append(choice);
-        }
-        if (!tags.length) {
-            const hint = document.createElement('span');
-            hint.className = 'st-auto-notes__help';
-            hint.textContent = 'Создай теги кнопкой «+» под лентой тегов.';
-            tagChoices.append(hint);
         }
         field.value = prompt.text;
         trigger.value = prompt.trigger ?? '';
@@ -999,12 +1014,14 @@ function parseProfileJson(text) {
     const prompts = source.prompts.map(entry => {
         const prompt = readPrompt(entry);
         if (!prompt || typeof prompt.text !== 'string') throw new Error('У каждой записи нужен текст text.');
+        if (typeof prompt.name !== 'string') throw new Error('Название записи должно быть текстом.');
         if (prompt.trigger !== undefined && typeof prompt.trigger !== 'string') throw new Error('Условие trigger должно быть текстом.');
         if (prompt.tagIds !== undefined && (!Array.isArray(prompt.tagIds) || prompt.tagIds.some(id => typeof id !== 'string'))) {
             throw new Error('Теги записи tagIds должны быть массивом строк.');
         }
         return {
             text: prompt.text,
+            name: prompt.name,
             trigger: prompt.trigger ?? '',
             priority: [1, 2, 3].includes(prompt.priority) ? prompt.priority : 2,
             tagIds: recordTags(prompt, tags),
@@ -1111,9 +1128,10 @@ function showNotice(title, paragraphs, buttons) {
 
 let addTagDialog;
 
-function showAddTagDialog() {
+function showAddTagDialog(promptIndex = null) {
     if (addTagDialog || !ui.key) return;
     const key = ui.key;
+    const targetPrompt = promptIndex === null ? null : chatSettings(getContext(), key)?.prompts[promptIndex];
     const { dialog, closed } = createDialog('Добавить тег');
     addTagDialog = dialog;
     const form = document.createElement('form');
@@ -1151,7 +1169,13 @@ function showAddTagDialog() {
         if (!value || ui.key !== key) { name.focus(); return; }
         editSettings(key, settings => {
             settings.tags ??= [];
-            settings.tags.push({ id: globalThis.crypto.randomUUID(), name: value, color: color.value });
+            const id = globalThis.crypto.randomUUID();
+            settings.tags.push({ id, name: value, color: color.value });
+            if (targetPrompt != null) {
+                const index = settings.prompts[promptIndex] === targetPrompt ? promptIndex
+                    : typeof targetPrompt === 'object' ? settings.prompts.indexOf(targetPrompt) : -1;
+                if (index >= 0) settings.prompts[index] = withRecordTags(targetPrompt, [...recordTags(targetPrompt, settings.tags), id]);
+            }
         });
         renderPrompts();
         dialog.close();
@@ -1472,7 +1496,7 @@ function mount() {
     ui.selectorPrompt.addEventListener('input', () => editSettings(ui.key, settings => {
         settings.selectorPrompt = ui.selectorPrompt.value;
     }));
-    ui.addTag.addEventListener('click', showAddTagDialog);
+    ui.addTag.addEventListener('click', () => showAddTagDialog());
     ui.add.addEventListener('click', () => {
         let index;
         editSettings(ui.key, settings => {
