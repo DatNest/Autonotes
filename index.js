@@ -1,4 +1,13 @@
 const SETTINGS_KEY = 'stAutoNotes';
+const EXTENSION_VERSION = '1.4.0';
+const UPDATE_SEEN_KEY = 'stAutoNotesUpdateSeen';
+const RELEASE_NOTES = [
+    'Два режима загрузки JSON. В «Промптах для заметок» нажми «Загрузить JSON · Дополнить», чтобы добавить записи к текущим.',
+    'Полная замена профиля. Нажми «Загрузить JSON · Переписать», выбери файл и подтверди замену кнопкой «Да». «Нет» отменяет загрузку.',
+    'Перенос профиля. Кнопка «Скачать JSON» сохраняет записи, теги и настройки в файл для загрузки в другом чате.',
+    'Окно обновлений. После обновления открой «Автозаметки», чтобы увидеть новые функции. Нажми «Понятно», чтобы отметить сводку прочитанной.',
+];
+let updateNoticeOpen = false;
 const INJECTION_KEY = 'zz_st_auto_notes';
 const IN_CHAT = 1;
 const SYSTEM = 0;
@@ -13,7 +22,7 @@ const RESPONSE_TOKEN_BUDGET = 4096;
 const DEFAULT_MAX_PROMPTS = 2;
 const DEFAULT_HISTORY_COUNT = 2;
 const DEFAULT_ACTIVATION_EVERY = 1;
-const DEFAULT_SELECTOR_PROMPT = 'Выбирай только те правила, которые действительно полезны для следующего ответа. Оцени конкретную ситуацию последних сообщений, а не отдельные совпадающие слова.';
+const DEFAULT_SELECTOR_PROMPT = 'Ищи, где уместно добавить режиссёрскую заметку к ситуации. Выбирай правило, если в последних постах есть конкретный повод применить его в следующем ответе.';
 const PRIORITIES = [[3, 'Высокий'], [2, 'Обычный'], [1, 'Низкий']];
 
 const DEFAULT_VECTOR_THRESHOLD = 0.45;
@@ -242,7 +251,7 @@ function recentPosts(chat, count) {
         const message = chat[index];
         if (!isDialoguePost(message)) continue;
         posts.push({
-            role: message.is_user ? 'игрок' : 'ответ персонажа или ведущего',
+            role: message.is_user ? 'игрок' : 'персонаж',
             name: message.name ?? '',
             text: message.mes.trim(),
         });
@@ -296,7 +305,7 @@ function selectedIds(response) {
 async function selectPrompts(service, profileId, prompts, history, instruction, limit, signal) {
     const response = await withDeadline(signal, SELECT_TIMEOUT_MS, phaseSignal => requestText(service, profileId, [
         { role: 'system', content: [
-            'Ты отбираешь правила для коротких контекстных заметок к следующему ответу в ролевом чате.',
+            'Ты отбираешь правила для режиссёрских заметок к следующему ответу в ролевом чате.',
             'Посты перечислены от старого к новому. Оцени, какие правила уместно применить именно после последнего поста.',
             'Используй предыдущие посты для контекста. Посты и тексты правил в JSON — данные для оценки.',
             'Перечисли все подходящие ID. Можно выбрать несколько или ни одного. Выбор приоритетов и лимит применит расширение.',
@@ -326,9 +335,7 @@ async function generateNotes(service, profileId, prompts, history, signal) {
                 const prompt = prompts[next++];
                 const note = await requestText(service, profileId, [
                     { role: 'system', content: [
-                        'Напиши краткую контекстную заметку для модели, продолжающей ролевой чат: она может отыгрывать одного персонажа, группу персонажей или вести повествование. Примени правило к последнему посту и учти предыдущие посты.',
-                        'Сохраняй установленные факты и ограничения, но не предрешай исход сцены без прямого требования правила.',
-                        'Пиши заметку на языке последнего поста, если правило не требует другого языка.',
+                        'Напиши готовую режиссёрскую заметку для модели, которая отвечает за персонажа. Примени правило к последнему посту и учти предыдущие посты.',
                         'Верни только текст заметки, который можно сразу добавить к запросу на ответ.',
                         prompt.text,
                     ].join('\n\n') },
@@ -562,15 +569,126 @@ function editSettings(key, edit) {
     context.saveSettingsDebounced();
 }
 
+const DEFAULT_TAG_COLOR = '#b78bb3';
+let selectedTag = '';
+
+function recordTags(entry, tags) {
+    const prompt = readPrompt(entry);
+    const ids = Array.isArray(prompt.tagIds) ? prompt.tagIds : [prompt.tagId];
+    return [...new Set(ids)].filter(id => tags.some(tag => tag.id === id));
+}
+
+function withRecordTags(entry, tagIds) {
+    const { tagId, ...prompt } = readPrompt(entry);
+    return { ...prompt, tagIds };
+}
+
+function tagButton(label, count, id, color, onClick, pressed = selectedTag === id) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'st-auto-notes__tag';
+    button.dataset.tag = id;
+    button.setAttribute('aria-pressed', String(pressed));
+    if (color) button.style.setProperty('--an-tag-color', color);
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-tag';
+    icon.setAttribute('aria-hidden', 'true');
+    const name = document.createElement('span');
+    name.className = 'st-auto-notes__tag-name';
+    name.textContent = label;
+    const badge = document.createElement('span');
+    badge.className = 'st-auto-notes__tag-count';
+    badge.textContent = String(count);
+    button.append(icon, name);
+    if (count !== null) button.append(badge);
+    button.addEventListener('click', () => {
+        if (onClick) { onClick(); return; }
+        selectedTag = id;
+        renderPrompts();
+    });
+    return button;
+}
+
+function renderTags(drafts, tags) {
+    ui.tagFilters.replaceChildren();
+    ui.tagFilters.append(tagButton('Все', drafts.length, ''));
+    ui.tagFilters.append(tagButton('Без тега', drafts.filter(prompt => !recordTags(prompt, tags).length).length, '__untagged'));
+    for (const tag of tags) {
+        const count = drafts.filter(prompt => recordTags(prompt, tags).includes(tag.id)).length;
+        ui.tagFilters.append(tagButton(tag.name, count, tag.id, tag.color));
+    }
+}
+
+function renderTagEditor() {
+    const key = ui.key;
+    const tags = chatSettings(getContext(), key)?.tags ?? [];
+    ui.tagEditor.replaceChildren();
+    for (const tag of tags) {
+        const row = document.createElement('div');
+        row.className = 'st-auto-notes__tag-edit';
+        const name = document.createElement('input');
+        name.type = 'text';
+        name.className = 'text_pole';
+        name.value = tag.name;
+        name.setAttribute('aria-label', 'Название тега');
+        const color = document.createElement('input');
+        color.type = 'color';
+        color.value = tag.color;
+        color.setAttribute('aria-label', 'Цвет тега');
+        const remove = document.createElement('button');
+        remove.className = 'menu_button';
+        remove.type = 'button';
+        remove.textContent = 'Удалить';
+        remove.setAttribute('aria-label', 'Удалить тег ' + tag.name);
+        name.addEventListener('change', () => {
+            const value = name.value.trim();
+            if (!value) { name.value = tag.name; return; }
+            editSettings(key, settings => {
+                settings.tags.find(item => item.id === tag.id).name = value;
+            });
+            renderPrompts();
+        });
+        color.addEventListener('input', () => {
+            editSettings(key, settings => {
+                settings.tags.find(item => item.id === tag.id).color = color.value;
+            });
+            renderPrompts();
+        });
+        remove.addEventListener('click', () => {
+            editSettings(key, settings => {
+                settings.prompts = settings.prompts.map(entry => {
+                    const ids = recordTags(entry, settings.tags);
+                    return ids.includes(tag.id)
+                        ? withRecordTags(entry, ids.filter(id => id !== tag.id))
+                        : entry;
+                });
+                settings.tags = settings.tags.filter(item => item.id !== tag.id);
+            });
+            if (selectedTag === tag.id) selectedTag = '';
+            renderTagEditor();
+            renderPrompts();
+        });
+        row.append(color, name, remove);
+        ui.tagEditor.append(row);
+    }
+}
+
 function renderPrompts(focusIndex) {
     const { key, prompts } = ui;
     prompts.replaceChildren();
-    const drafts = chatSettings(getContext(), key)?.prompts ?? [];
+    const settings = chatSettings(getContext(), key);
+    const drafts = settings?.prompts ?? [];
+    const tags = settings?.tags ?? [];
+    if (selectedTag && selectedTag !== '__untagged' && !tags.some(tag => tag.id === selectedTag)) selectedTag = '';
+    renderTags(drafts, tags);
     ui.empty.hidden = drafts.length > 0;
+    ui.filterEmpty.hidden = true;
     const isVector = ui.mode.value === 'vector';
 
     drafts.forEach((entry, index) => {
         const prompt = readPrompt(entry);
+        const tagIds = recordTags(entry, tags);
+        if (selectedTag && (selectedTag === '__untagged' ? tagIds.length > 0 : !tagIds.includes(selectedTag))) return;
         const card = document.createElement('div');
         card.className = 'st-auto-notes__card';
         card.dataset.priority = prompt.priority;
@@ -581,7 +699,7 @@ function renderPrompts(focusIndex) {
             </div>
             <label class="st-auto-notes__field st-auto-notes__trigger" ${isVector ? '' : 'hidden'}>
                 Когда срабатывает
-                <textarea class="text_pole" rows="2" placeholder="Например: персонаж пытается бежать после недавнего ранения"></textarea>
+                <textarea class="text_pole" rows="2" placeholder="Например, кто-то заметил проявление сил Кларка"></textarea>
             </label>
             <label class="st-auto-notes__field">
                 Что подсказать
@@ -590,11 +708,34 @@ function renderPrompts(focusIndex) {
             <label class="st-auto-notes__priority">
                 Приоритет
                 <select class="text_pole" aria-label="Приоритет промпта ${index + 1}"></select>
-            </label>`;
+            </label>
+            <div class="st-auto-notes__record-tags">
+                <span>Теги</span>
+                <div class="st-auto-notes__tag-filters" role="group" aria-label="Теги промпта ${index + 1}"></div>
+            </div>`;
         const field = card.querySelector('textarea[id]');
         const trigger = card.querySelector('.st-auto-notes__trigger textarea');
         const priority = card.querySelector('select');
         const remove = card.querySelector('button');
+        const tagChoices = card.querySelector('.st-auto-notes__record-tags .st-auto-notes__tag-filters');
+        for (const tag of tags) {
+            const choice = tagButton(tag.name, null, tag.id, tag.color, () => {
+                editSettings(key, settings => {
+                    const ids = recordTags(settings.prompts[index], settings.tags ?? []);
+                    const next = ids.includes(tag.id) ? ids.filter(id => id !== tag.id) : [...ids, tag.id];
+                    settings.prompts[index] = withRecordTags(settings.prompts[index], next);
+                });
+                renderPrompts();
+                ui.prompts.querySelector(`[aria-label="Теги промпта ${index + 1}"] [data-tag="${tag.id}"]`)?.focus();
+            }, tagIds.includes(tag.id));
+            tagChoices.append(choice);
+        }
+        if (!tags.length) {
+            const hint = document.createElement('span');
+            hint.className = 'st-auto-notes__help';
+            hint.textContent = 'Создай теги в «Настроить теги».';
+            tagChoices.append(hint);
+        }
         field.value = prompt.text;
         trigger.value = prompt.trigger ?? '';
         priority.replaceChildren(...PRIORITIES.map(([value, label]) => new Option(label, String(value))));
@@ -622,6 +763,7 @@ function renderPrompts(focusIndex) {
         prompts.append(card);
         if (index === focusIndex) field.focus();
     });
+    ui.filterEmpty.hidden = !drafts.length || prompts.childElementCount > 0;
 }
 
 function renderMode() {
@@ -635,6 +777,9 @@ function renderChat() {
     const context = getContext();
     clearConnectionTest();
     ui.key = chatKey(context);
+    selectedTag = '';
+    ui.tagName.value = '';
+    ui.tagColor.value = DEFAULT_TAG_COLOR;
     const settings = chatSettings(context, ui.key);
     ui.fields.hidden = !ui.key;
     ui.fields.disabled = !ui.key;
@@ -650,6 +795,7 @@ function renderChat() {
     ui.selectorPrompt.value = settings?.selectorPrompt ?? DEFAULT_SELECTOR_PROMPT;
     ui.status.textContent = '';
     renderProfiles(context);
+    renderTagEditor();
     renderMode();
 }
 
@@ -661,6 +807,178 @@ function bindNumber(field, key, fallback, update = (settings, value) => { settin
     field.addEventListener('change', () => {
         field.value = chatSettings(getContext(), ui.key)?.[key] ?? fallback;
     });
+}
+
+function parseProfileJson(text) {
+    const value = JSON.parse(text);
+    const source = Array.isArray(value) ? { prompts: value } : value?.profile ?? value;
+    if (!source || typeof source !== 'object' || !Array.isArray(source.prompts)) {
+        throw new Error('В JSON нужен список prompts или массив записей.');
+    }
+    if (source.tags !== undefined && !Array.isArray(source.tags)) throw new Error('Поле tags должно быть массивом.');
+
+    const tags = (source.tags ?? []).map(tag => {
+        if (!tag || typeof tag.id !== 'string' || !tag.id || typeof tag.name !== 'string' || !tag.name.trim()) {
+            throw new Error('У каждого тега нужны id и название.');
+        }
+        return { id: tag.id, name: tag.name.trim(), color: /^#[0-9a-f]{6}$/i.test(tag.color) ? tag.color : DEFAULT_TAG_COLOR };
+    });
+    if (new Set(tags.map(tag => tag.id)).size !== tags.length) throw new Error('В JSON повторяются id тегов.');
+    const prompts = source.prompts.map(entry => {
+        const prompt = readPrompt(entry);
+        if (!prompt || typeof prompt.text !== 'string') throw new Error('У каждой записи нужен текст text.');
+        if (prompt.trigger !== undefined && typeof prompt.trigger !== 'string') throw new Error('Условие trigger должно быть текстом.');
+        if (prompt.tagIds !== undefined && (!Array.isArray(prompt.tagIds) || prompt.tagIds.some(id => typeof id !== 'string'))) {
+            throw new Error('Теги записи tagIds должны быть массивом строк.');
+        }
+        return {
+            text: prompt.text,
+            trigger: prompt.trigger ?? '',
+            priority: [1, 2, 3].includes(prompt.priority) ? prompt.priority : 2,
+            tagIds: recordTags(prompt, tags),
+        };
+    });
+    const profile = { enabled: false, profileId: '', prompts, tags };
+    for (const name of ['profileId', 'selectorPrompt']) {
+        if (source[name] !== undefined) {
+            if (typeof source[name] !== 'string') throw new Error('Некорректное поле ' + name + '.');
+            profile[name] = source[name];
+        }
+    }
+    if (source.enabled !== undefined) {
+        if (typeof source.enabled !== 'boolean') throw new Error('Некорректное поле enabled.');
+        profile.enabled = source.enabled;
+    }
+    if (source.mode !== undefined) {
+        if (!Object.hasOwn(VECTOR_MODES, source.mode)) throw new Error('Неизвестный режим отбора.');
+        profile.mode = source.mode;
+    }
+    for (const name of ['maxPrompts', 'historyCount', 'activationEvery']) {
+        if (source[name] === undefined) continue;
+        if (!Number.isSafeInteger(source[name]) || source[name] < 1) throw new Error('Некорректное поле ' + name + '.');
+        profile[name] = source[name];
+    }
+    if (source.vectorThreshold !== undefined) {
+        if (!Number.isFinite(source.vectorThreshold) || source.vectorThreshold < 0 || source.vectorThreshold > 1) {
+            throw new Error('Порог совпадения должен быть от 0 до 1.');
+        }
+        profile.vectorThreshold = source.vectorThreshold;
+    }
+    return profile;
+}
+
+function appendProfile(settings, incoming) {
+    settings.tags ??= [];
+    const ids = new Map();
+    for (const tag of incoming.tags) {
+        const existing = settings.tags.find(item => item.name === tag.name && item.color === tag.color);
+        if (existing) {
+            ids.set(tag.id, existing.id);
+        } else {
+            const id = globalThis.crypto.randomUUID();
+            settings.tags.push({ ...tag, id });
+            ids.set(tag.id, id);
+        }
+    }
+    settings.prompts.push(...incoming.prompts.map(prompt => ({
+        ...prompt,
+        tagIds: prompt.tagIds.map(id => ids.get(id)),
+    })));
+}
+
+function showNotice(title, paragraphs, buttons) {
+    return new Promise(resolve => {
+        const dialog = document.createElement('dialog');
+        dialog.className = 'st-auto-notes st-auto-notes__confirm';
+        const heading = document.createElement('h3');
+        heading.id = 'st-auto-notes-dialog-title';
+        heading.textContent = title;
+        dialog.setAttribute('aria-labelledby', heading.id);
+        dialog.append(heading);
+        for (const text of paragraphs) {
+            const paragraph = document.createElement('p');
+            paragraph.textContent = text;
+            dialog.append(paragraph);
+        }
+        const form = document.createElement('form');
+        form.method = 'dialog';
+        for (const [value, label] of buttons) {
+            const button = document.createElement('button');
+            button.className = 'menu_button';
+            button.value = value;
+            button.textContent = label;
+            form.append(button);
+        }
+        form.firstElementChild.autofocus = true;
+        dialog.append(form);
+        dialog.addEventListener('close', () => {
+            const result = dialog.returnValue;
+            dialog.remove();
+            resolve(result);
+        }, { once: true });
+        document.body.append(dialog);
+        dialog.showModal();
+    });
+}
+
+function confirmProfileReplacement() {
+    return showNotice('Переписать профиль?',
+        ['Удалить старые записи и переписать новым JSON полностью?'],
+        [['no', 'Нет'], ['yes', 'Да']]).then(result => result === 'yes');
+}
+
+async function showUpdateNotice() {
+    const context = getContext();
+    if (updateNoticeOpen || context.extensionSettings[UPDATE_SEEN_KEY] === EXTENSION_VERSION) return;
+    updateNoticeOpen = true;
+    try {
+        const result = await showNotice('Что нового · Автозаметки ' + EXTENSION_VERSION,
+            RELEASE_NOTES, [['understood', 'Понятно']]);
+        if (result === 'understood') {
+            const current = getContext();
+            current.extensionSettings[UPDATE_SEEN_KEY] = EXTENSION_VERSION;
+            current.saveSettingsDebounced();
+        }
+    } finally {
+        updateNoticeOpen = false;
+    }
+}
+
+async function importProfile(file, mode, key) {
+    try {
+        const incoming = parseProfileJson(await file.text());
+        if (chatKey(getContext()) !== key) return;
+        if (mode === 'replace' && !await confirmProfileReplacement()) return;
+        const context = getContext();
+        if (chatKey(context) !== key) return;
+        resetTurn();
+        vectorCache.clear();
+        if (mode === 'replace') {
+            incoming.activationStart = countPlayerPosts(context.chat);
+            context.extensionSettings[SETTINGS_KEY] ??= {};
+            context.extensionSettings[SETTINGS_KEY][key] = incoming;
+            context.saveSettingsDebounced();
+        } else {
+            editSettings(key, settings => appendProfile(settings, incoming));
+        }
+        renderChat();
+        setStatus(key, `JSON загружен · записей ${incoming.prompts.length}.`);
+    } catch (error) {
+        setStatus(key, error instanceof SyntaxError ? 'Не удалось прочитать JSON. Проверь формат файла.' : error.message);
+    }
+}
+
+function exportProfile() {
+    const settings = chatSettings(getContext(), ui.key);
+    if (!settings) return;
+    const { activationStart, ...profile } = settings;
+    const blob = new Blob([JSON.stringify({ version: 1, profile }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'AutoNotes-profile.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function mount() {
@@ -732,8 +1050,24 @@ function mount() {
                         <h3>Промпты для заметок</h3>
                         <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
                     </div>
+                    <div class="st-auto-notes__json-actions">
+                        <button type="button" class="menu_button" data-field="importAppend">Загрузить JSON · Дополнить</button>
+                        <button type="button" class="menu_button" data-field="importReplace">Загрузить JSON · Переписать</button>
+                        <button type="button" class="menu_button" data-field="exportJson">Скачать JSON</button>
+                    </div>
                     <p class="st-auto-notes__help">При одинаковом приоритете первым выбирается промпт выше в списке.</p>
+                    <div class="st-auto-notes__tag-filters" data-field="tagFilters" role="group" aria-label="Фильтр по тегам"></div>
+                    <details class="st-auto-notes__tag-manager">
+                        <summary>Настроить теги</summary>
+                        <div data-field="tagEditor"></div>
+                        <div class="st-auto-notes__tag-edit">
+                            <input type="color" data-field="tagColor" value="#b78bb3" aria-label="Цвет нового тега">
+                            <input type="text" class="text_pole" data-field="tagName" placeholder="Название тега" aria-label="Название нового тега">
+                            <button type="button" class="menu_button" data-field="addTag">+ Тег</button>
+                        </div>
+                    </details>
                     <div class="st-auto-notes__prompts" data-field="prompts"></div>
+                    <p class="st-auto-notes__help" data-field="filterEmpty" hidden>С этим тегом пока нет записей.</p>
                     <p class="st-auto-notes__help" data-field="empty">Добавь правило, которое модель сможет применить к сцене.</p>
                 </div>
                 <p class="st-auto-notes__status" data-field="status" role="status"></p>
@@ -748,6 +1082,20 @@ function mount() {
         clearConnectionTest();
     });
     ui.testButton.addEventListener('click', testConnection);
+    for (const [button, mode] of [[ui.importAppend, 'append'], [ui.importReplace, 'replace']]) {
+        button.addEventListener('click', () => {
+            const key = ui.key;
+            const picker = document.createElement('input');
+            picker.type = 'file';
+            picker.accept = '.json,application/json';
+            picker.addEventListener('change', () => {
+                const file = picker.files?.[0];
+                if (file) void importProfile(file, mode, key);
+            }, { once: true });
+            picker.click();
+        });
+    }
+    ui.exportJson.addEventListener('click', exportProfile);
     ui.mode.replaceChildren(...Object.entries(VECTOR_MODES).map(([value, label]) => new Option(label, value)));
     ui.mode.addEventListener('change', () => {
         editSettings(ui.key, settings => { settings.mode = ui.mode.value; });
@@ -775,16 +1123,33 @@ function mount() {
     ui.selectorPrompt.addEventListener('input', () => editSettings(ui.key, settings => {
         settings.selectorPrompt = ui.selectorPrompt.value;
     }));
+    ui.addTag.addEventListener('click', () => {
+        const name = ui.tagName.value.trim();
+        if (!name) { ui.tagName.focus(); return; }
+        editSettings(ui.key, settings => {
+            settings.tags ??= [];
+            settings.tags.push({ id: globalThis.crypto.randomUUID(), name, color: ui.tagColor.value });
+        });
+        ui.tagName.value = '';
+        renderTagEditor();
+        renderPrompts();
+    });
+    ui.tagName.addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); ui.addTag.click(); }
+    });
     ui.add.addEventListener('click', () => {
         let index;
         editSettings(ui.key, settings => {
-            settings.prompts.push({ text: '', priority: 2 });
+            settings.prompts.push({ text: '', priority: 2, tagIds: selectedTag && selectedTag !== '__untagged' ? [selectedTag] : [] });
             index = settings.prompts.length - 1;
         });
         renderPrompts(index);
     });
     panel.addEventListener('toggle', () => {
-        if (panel.open) renderProfiles();
+        if (panel.open) {
+            renderProfiles();
+            void showUpdateNotice();
+        }
     });
     host.append(panel);
     renderChat();

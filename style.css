@@ -254,3 +254,112 @@
     justify-self: stretch;
     white-space: pre-line;
 }
+
+.st-auto-notes__tag-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem;
+    margin-block: .65rem;
+}
+
+.st-auto-notes__tag {
+    --an-tag-color: var(--an-accent);
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    max-width: 100%;
+    min-height: 2.1rem;
+    padding: .3rem .65rem;
+    border: 1px solid color-mix(in srgb, var(--an-tag-color) 70%, var(--an-line));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--an-tag-color) 17%, var(--an-base));
+    color: inherit;
+    font: inherit;
+    font-size: .9em;
+    cursor: pointer;
+}
+
+.st-auto-notes__tag > i {
+    color: var(--an-tag-color);
+}
+
+.st-auto-notes__tag[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--an-tag-color) 32%, var(--an-base));
+    outline: 1px solid var(--an-tag-color);
+    outline-offset: 2px;
+}
+
+.st-auto-notes__tag-name {
+    overflow-wrap: anywhere;
+}
+
+.st-auto-notes__tag-count {
+    margin-inline-start: auto;
+    opacity: .55;
+    font-variant-numeric: tabular-nums;
+}
+
+.st-auto-notes__tag-manager {
+    margin-block: .5rem .75rem;
+}
+
+.st-auto-notes__tag-manager summary {
+    cursor: pointer;
+    margin-block-end: .45rem;
+}
+
+.st-auto-notes__tag-edit {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    margin-block: .4rem;
+}
+
+.st-auto-notes__tag-edit input[type="color"] {
+    flex: 0 0 2rem;
+    width: 2rem;
+    height: 2rem;
+    padding: .1rem;
+    border: 1px solid var(--an-line);
+    border-radius: 5px;
+    background: var(--an-base);
+    cursor: pointer;
+}
+
+.st-auto-notes__tag-edit input[type="text"] {
+    flex: 1 1 5rem;
+    min-width: 0;
+}
+
+
+.st-auto-notes__record-tags {
+    margin-block-start: .6rem;
+}
+
+.st-auto-notes__record-tags .st-auto-notes__tag-filters {
+    margin-block: .35rem 0;
+}
+
+.st-auto-notes__json-actions,
+.st-auto-notes__confirm form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .45rem;
+    margin-block: .6rem;
+}
+
+dialog.st-auto-notes__confirm {
+    position: fixed;
+    margin: auto;
+    padding: 1rem;
+    width: min(26rem, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    background: var(--SmartThemeFastUIBGColor, Canvas);
+    color: var(--SmartThemeBodyColor, CanvasText);
+    box-sizing: border-box;
+}
+
+.st-auto-notes__confirm::backdrop {
+    background: rgb(0 0 0 / .5);
+}
