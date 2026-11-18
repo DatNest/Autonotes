@@ -122,13 +122,6 @@
     font-weight: 600;
 }
 
-.st-auto-notes__numbers {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .55rem;
-    margin-block-start: .55rem;
-}
-
 .st-auto-notes .text_pole {
     box-sizing: border-box;
     width: 100%;
@@ -163,7 +156,20 @@
 
 .st-auto-notes__prompts {
     display: grid;
+    align-content: start;
     gap: .55rem;
+    block-size: 20rem;
+    max-block-size: 55dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    padding: .15rem;
+    min-block-size: 0;
+}
+
+.st-auto-notes__prompts:empty {
+    display: none;
 }
 
 .st-auto-notes__card {
@@ -223,12 +229,6 @@
 
 .st-auto-notes__status:empty {
     display: none;
-}
-
-@container st-auto-notes (max-width: 265px) {
-    .st-auto-notes__numbers {
-        grid-template-columns: minmax(0, 1fr);
-    }
 }
 
 .st-auto-notes__trigger {
@@ -300,20 +300,15 @@
     font-variant-numeric: tabular-nums;
 }
 
-.st-auto-notes__tag-manager {
-    margin-block: .5rem .75rem;
-}
-
-.st-auto-notes__tag-manager summary {
-    cursor: pointer;
-    margin-block-end: .45rem;
-}
-
 .st-auto-notes__tag-edit {
     display: flex;
     align-items: center;
     gap: .4rem;
-    margin-block: .4rem;
+    margin: 0;
+    flex: 0 0 auto;
+    padding: .25rem;
+    border: 1px solid var(--an-line);
+    border-radius: .6rem;
 }
 
 .st-auto-notes__tag-edit input[type="color"] {
@@ -328,7 +323,8 @@
 }
 
 .st-auto-notes__tag-edit input[type="text"] {
-    flex: 1 1 5rem;
+    flex: 0 0 8rem;
+    width: 8rem;
     min-width: 0;
 }
 
@@ -434,6 +430,8 @@ dialog.st-auto-notes__confirm {
     align-items: center;
     gap: .4rem .6rem;
     padding: .65rem;
+    min-block-size: 3.4rem;
+    box-sizing: border-box;
     cursor: pointer;
     list-style: none;
 }
@@ -590,10 +588,6 @@ dialog.st-auto-notes__confirm {
     margin: 0;
 }
 
-.st-auto-notes__nested-settings {
-    margin-block: .65rem;
-}
-
 .st-auto-notes__debug-item {
     padding-block: .45rem;
     border-top: 1px solid var(--an-line);
@@ -609,4 +603,119 @@ dialog.st-auto-notes__confirm {
     overflow-wrap: anywhere;
     font-size: .92em;
     line-height: 1.55;
+}
+
+
+.st-auto-notes__settings-groups {
+    display: grid;
+    gap: .55rem;
+}
+
+.st-auto-notes__settings-group {
+    min-width: 0;
+    border: 1px solid var(--an-line);
+    border-radius: 7px;
+}
+
+.st-auto-notes__settings-group > summary {
+    padding: .55rem .65rem;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.st-auto-notes__settings-content {
+    display: grid;
+    gap: .5rem;
+    padding: 0 .65rem .65rem;
+    min-width: 0;
+}
+
+.st-auto-notes__settings-content .st-auto-notes__help {
+    margin: 0;
+}
+
+.st-auto-notes__settings-content .st-auto-notes__json-actions {
+    margin: 0;
+}
+
+
+.st-auto-notes__tag-bar {
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    min-width: 0;
+    margin-block: .65rem;
+}
+
+.st-auto-notes__tag-bar > .st-auto-notes__tag-filters {
+    flex: 1 1 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+    margin: 0;
+    padding: .2rem;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+}
+
+.st-auto-notes__tag-bar > .st-auto-notes__tag-filters::-webkit-scrollbar {
+    display: none;
+}
+
+.st-auto-notes__tag-bar .st-auto-notes__tag {
+    flex: 0 0 auto;
+    max-width: none;
+    white-space: nowrap;
+}
+
+.st-auto-notes__tag-settings-button {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.st-auto-notes__tag-edit button,
+.st-auto-notes__tag-add-button {
+    color: inherit;
+    background: var(--an-base);
+    border: 1px solid var(--an-line);
+    border-radius: .45rem;
+    font: inherit;
+    cursor: pointer;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: .2rem;
+}
+
+.st-auto-notes__tag-edit button:disabled {
+    opacity: .35;
+    cursor: default;
+}
+
+.st-auto-notes__tag-settings-button[aria-pressed="true"] {
+    background: var(--an-base);
+    outline: 1px solid var(--an-line);
+    border-radius: .45rem;
+}
+
+.st-auto-notes__tag-add-row {
+    display: flex;
+    margin-block: -.25rem .65rem;
+}
+
+.st-auto-notes__add-tag-form {
+    display: grid;
+    gap: .75rem;
+}
+
+.st-auto-notes__add-tag-form label {
+    display: grid;
+    gap: .35rem;
 }

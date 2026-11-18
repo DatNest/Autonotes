@@ -1,12 +1,13 @@
 const SETTINGS_KEY = 'stAutoNotes';
-const EXTENSION_VERSION = '1.5.0';
+const EXTENSION_VERSION = '1.5.1';
 const UPDATE_SEEN_KEY = 'stAutoNotesUpdateSeen';
 const RELEASE_NOTES = [
-    'Импорт в одном окне. Нажми «Импорт», выбери JSON и переключи «Заменить / Добавить». Под переключателем показано, как загрузится профиль.',
-    'Подтверждение замены появляется только при наличии старых промптов. Нажми «Импортировать», затем «Да», чтобы заменить их, или «Нет», чтобы вернуться к выбору.',
-    'Настройки. Импорт, экспорт, проверка подключения и управление тегами собраны в разделе «Настройки».',
-    'Отладка. Открой раздел «Отладка», чтобы увидеть последние выбранные правила, тексты подсказок и подтверждение включения в собранный запрос.',
-    'Сохранение подсказок. Свайпы и перегенерации используют готовые подсказки того же хода. Переключатель «Сохранять подсказки при перегенерации» находится в настройках.',
+    'Все разделы закрыты после обновления страницы. Нажми на нужный заголовок, чтобы раскрыть его.',
+    'Настройки разбиты на группы: подключение, частота и контекст, отбор правил, перегенерация.',
+    'Импорт и экспорт находятся под «Добавить промпт». Карандаш ✏️ справа от тегов включает редактирование: название, цвет, порядок стрелками и удаление крестиком с подтверждением.',
+    'Добавляй теги кнопкой «+» на отдельной второй строке под лентой.',
+    'Теги расположены одной лентой. Прокручивай её колесом мыши на ПК или свайпом на телефоне.',
+    'Список промптов занимает небольшой блок примерно на пять закрытых записей. Остальные записи доступны при прокрутке внутри списка.',
 ];
 let updateNoticeOpen = false;
 const INJECTION_KEY = 'zz_st_auto_notes';
@@ -683,6 +684,7 @@ function editSettings(key, edit) {
 
 const DEFAULT_TAG_COLOR = '#b78bb3';
 let selectedTag = '';
+let editingTags = false;
 let openPromptIndexes = new Set();
 
 function recordTags(entry, tags) {
@@ -723,67 +725,87 @@ function tagButton(label, count, id, color, onClick, pressed = selectedTag === i
 }
 
 function renderTags(drafts, tags) {
+    const scrollLeft = ui.tagFilters.scrollLeft;
     ui.tagFilters.replaceChildren();
     ui.tagFilters.append(tagButton('Все', drafts.length, ''));
     ui.tagFilters.append(tagButton('Без тега', drafts.filter(prompt => !recordTags(prompt, tags).length).length, '__untagged'));
     for (const tag of tags) {
         const count = drafts.filter(prompt => recordTags(prompt, tags).includes(tag.id)).length;
-        ui.tagFilters.append(tagButton(tag.name, count, tag.id, tag.color));
+        ui.tagFilters.append(editingTags ? tagEditor(tag, tags) : tagButton(tag.name, count, tag.id, tag.color));
     }
+    ui.tagFilters.scrollLeft = scrollLeft;
 }
 
-function renderTagEditor() {
+function tagEditor(tag, tags) {
     const key = ui.key;
-    const tags = chatSettings(getContext(), key)?.tags ?? [];
-    ui.tagEditor.replaceChildren();
-    for (const tag of tags) {
-        const row = document.createElement('div');
-        row.className = 'st-auto-notes__tag-edit';
-        const name = document.createElement('input');
-        name.type = 'text';
-        name.className = 'text_pole';
-        name.value = tag.name;
-        name.setAttribute('aria-label', 'Название тега');
-        const color = document.createElement('input');
-        color.type = 'color';
-        color.value = tag.color;
-        color.setAttribute('aria-label', 'Цвет тега');
-        const remove = document.createElement('button');
-        remove.className = 'menu_button';
-        remove.type = 'button';
-        remove.textContent = 'Удалить';
-        remove.setAttribute('aria-label', 'Удалить тег ' + tag.name);
-        name.addEventListener('change', () => {
-            const value = name.value.trim();
-            if (!value) { name.value = tag.name; return; }
+    const row = document.createElement('div');
+    row.className = 'st-auto-notes__tag-edit';
+    row.dataset.editTag = tag.id;
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'text_pole';
+    name.value = tag.name;
+    name.setAttribute('aria-label', 'Название тега');
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.value = tag.color;
+    color.setAttribute('aria-label', 'Цвет тега ' + tag.name);
+    name.addEventListener('change', () => {
+        const value = name.value.trim();
+        if (!value) { name.value = tag.name; return; }
+        editSettings(key, settings => {
+            const target = settings.tags.find(item => item.id === tag.id);
+            if (target) target.name = value;
+        });
+        renderPrompts();
+    });
+    color.addEventListener('change', () => {
+        editSettings(key, settings => {
+            const target = settings.tags.find(item => item.id === tag.id);
+            if (target) target.color = color.value;
+        });
+        renderPrompts();
+    });
+    row.append(color, name);
+    for (const [offset, label, title] of [[-1, '←', 'Переместить тег влево'], [1, '→', 'Переместить тег вправо']]) {
+        const move = document.createElement('button');
+        move.type = 'button';
+        move.textContent = label;
+        move.title = title;
+        move.setAttribute('aria-label', title + ': ' + tag.name);
+        const index = tags.findIndex(item => item.id === tag.id);
+        move.disabled = index + offset < 0 || index + offset >= tags.length;
+        move.addEventListener('click', () => {
             editSettings(key, settings => {
-                settings.tags.find(item => item.id === tag.id).name = value;
+                const index = settings.tags.findIndex(item => item.id === tag.id);
+                const next = index + offset;
+                if (index < 0 || next < 0 || next >= settings.tags.length) return;
+                [settings.tags[index], settings.tags[next]] = [settings.tags[next], settings.tags[index]];
             });
             renderPrompts();
+            [...ui.tagFilters.children].find(item => item.dataset.editTag === tag.id)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         });
-        color.addEventListener('input', () => {
-            editSettings(key, settings => {
-                settings.tags.find(item => item.id === tag.id).color = color.value;
-            });
-            renderPrompts();
-        });
-        remove.addEventListener('click', () => {
-            editSettings(key, settings => {
-                settings.prompts = settings.prompts.map(entry => {
-                    const ids = recordTags(entry, settings.tags);
-                    return ids.includes(tag.id)
-                        ? withRecordTags(entry, ids.filter(id => id !== tag.id))
-                        : entry;
-                });
-                settings.tags = settings.tags.filter(item => item.id !== tag.id);
-            });
-            if (selectedTag === tag.id) selectedTag = '';
-            renderTagEditor();
-            renderPrompts();
-        });
-        row.append(color, name, remove);
-        ui.tagEditor.append(row);
+        row.append(move);
     }
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', 'Удалить тег ' + tag.name);
+    remove.addEventListener('click', async () => {
+        const answer = await showNotice('Удалить тег?', ['Хотите удалить этот тег: «' + tag.name + '»? Записи сохранятся.'], [['no', 'Нет'], ['yes', 'Да']]);
+        if (answer !== 'yes' || ui.key !== key) return;
+        editSettings(key, settings => {
+            settings.prompts = settings.prompts.map(entry => {
+                const ids = recordTags(entry, settings.tags);
+                return ids.includes(tag.id) ? withRecordTags(entry, ids.filter(id => id !== tag.id)) : entry;
+            });
+            settings.tags = settings.tags.filter(item => item.id !== tag.id);
+        });
+        if (selectedTag === tag.id) selectedTag = '';
+        renderPrompts();
+    });
+    row.append(remove);
+    return row;
 }
 
 function renderPrompts(focusIndex) {
@@ -869,7 +891,7 @@ function renderPrompts(focusIndex) {
         if (!tags.length) {
             const hint = document.createElement('span');
             hint.className = 'st-auto-notes__help';
-            hint.textContent = 'Создай теги в «Настроить теги».';
+            hint.textContent = 'Создай теги кнопкой «+» под лентой тегов.';
             tagChoices.append(hint);
         }
         field.value = prompt.text;
@@ -916,11 +938,12 @@ function renderMode() {
 function renderChat() {
     const context = getContext();
     clearConnectionTest();
+    addTagDialog?.close();
     ui.key = chatKey(context);
     selectedTag = '';
     openPromptIndexes.clear();
-    ui.tagName.value = '';
-    ui.tagColor.value = DEFAULT_TAG_COLOR;
+    editingTags = false;
+    ui.tagSettingsButton.setAttribute('aria-pressed', 'false');
     const settings = chatSettings(context, ui.key);
     ui.fields.hidden = !ui.key;
     ui.fields.disabled = !ui.key;
@@ -945,7 +968,6 @@ function renderChat() {
         });
     }
     renderDebug();
-    renderTagEditor();
     renderMode();
 }
 
@@ -1085,6 +1107,58 @@ function showNotice(title, paragraphs, buttons) {
     dialog.append(actions);
     dialog.showModal();
     return closed;
+}
+
+let addTagDialog;
+
+function showAddTagDialog() {
+    if (addTagDialog || !ui.key) return;
+    const key = ui.key;
+    const { dialog, closed } = createDialog('Добавить тег');
+    addTagDialog = dialog;
+    const form = document.createElement('form');
+    form.className = 'st-auto-notes__add-tag-form';
+    const label = document.createElement('label');
+    label.textContent = 'Название тега';
+    const name = document.createElement('input');
+    name.className = 'text_pole';
+    name.type = 'text';
+    name.required = true;
+    name.autofocus = true;
+    label.append(name);
+    const colorLabel = document.createElement('label');
+    colorLabel.textContent = 'Цвет тега';
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.value = DEFAULT_TAG_COLOR;
+    colorLabel.append(color);
+    const actions = document.createElement('div');
+    actions.className = 'st-auto-notes__dialog-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'menu_button';
+    cancel.textContent = 'Отмена';
+    cancel.addEventListener('click', () => dialog.close());
+    const add = document.createElement('button');
+    add.type = 'submit';
+    add.className = 'menu_button';
+    add.textContent = 'Добавить';
+    actions.append(cancel, add);
+    form.append(label, colorLabel, actions);
+    form.addEventListener('submit', event => {
+        event.preventDefault();
+        const value = name.value.trim();
+        if (!value || ui.key !== key) { name.focus(); return; }
+        editSettings(key, settings => {
+            settings.tags ??= [];
+            settings.tags.push({ id: globalThis.crypto.randomUUID(), name: value, color: color.value });
+        });
+        renderPrompts();
+        dialog.close();
+    });
+    dialog.append(form);
+    closed.then(() => { if (addTagDialog === dialog) addTagDialog = undefined; });
+    dialog.showModal();
 }
 
 function showImportDialog() {
@@ -1237,89 +1311,101 @@ function mount() {
         <div class="st-auto-notes__body">
             <p data-field="message">Открой чат, чтобы настроить автозаметки.</p>
             <fieldset data-field="fields">
-                <details class="st-auto-notes__section" open>
+                <details class="st-auto-notes__section">
                     <summary class="st-auto-notes__section-summary">
                         <span class="st-auto-notes__chat">
                             <span class="st-auto-notes__section-title">Настройки</span>
                             <span class="st-auto-notes__chat-name" data-field="chatName"></span>
                         </span>
                     </summary>
-                    <div class="st-auto-notes__section-content">
+                    <div class="st-auto-notes__section-content st-auto-notes__settings-groups">
                         <label class="st-auto-notes__toggle">
                             <input type="checkbox" data-field="enabled">
                             Включить в этом чате
                         </label>
-                    <label class="st-auto-notes__field">
-                        Профиль подключения
-                        <select class="text_pole" data-field="profile"></select>
-                    </label>
-                    <div class="st-auto-notes__numbers">
-                        <label class="st-auto-notes__field">
-                            Макс. промптов за ход
-                            <input type="number" class="text_pole" data-field="maxPrompts" min="1" step="1" inputmode="numeric">
-                        </label>
-                        <label class="st-auto-notes__field">
-                            Последних постов читать
-                            <input type="number" class="text_pole" data-field="historyCount" min="1" step="1" inputmode="numeric">
-                        </label>
-                        <label class="st-auto-notes__field">
-                            Проверять раз в N постов
-                            <input type="number" class="text_pole" data-field="activationEvery" min="1" step="1" inputmode="numeric" aria-describedby="st-auto-notes-activation-help">
-                        </label>
-                    </div>
-                    <p class="st-auto-notes__help" id="st-auto-notes-activation-help">Считаются новые посты игрока. 1 — проверять каждый пост.</p>
-                    <label class="st-auto-notes__toggle">
-                        <input type="checkbox" data-field="reuseNotes">
-                        Сохранять подсказки при перегенерации
-                    </label>
-                    <p class="st-auto-notes__help">Готовые подсказки используются повторно на свайпах и при перегенерации того же хода. При выключении перегенерация идёт без подсказок.</p>
-                <details class="st-auto-notes__section st-auto-notes__nested-settings" open>
-                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Как отбирать правила</span></summary>
-                    <div class="st-auto-notes__section-content">
-                    <select class="text_pole" data-field="mode" aria-label="Как отбирать правила"></select>
-                    <div data-field="vectorOptions">
-                        <p class="st-auto-notes__help">Поиск использует источник из Vector Storage. Если поле «Когда срабатывает» пустое, поиск идёт по тексту правила.</p>
-                        <label class="st-auto-notes__field">
-                            Порог совпадения
-                            <input type="number" class="text_pole" data-field="vectorThreshold" min="0" max="1" step="0.01" inputmode="decimal">
-                        </label>
-                        <p class="st-auto-notes__help">Выше порог — меньше совпадений.</p>
-                    </div>
-                    <div data-field="selectorOptions">
-                        <h3><label for="st-auto-notes-selector">Общий промпт отбора</label></h3>
-                        <p id="st-auto-notes-selector-help" class="st-auto-notes__help">По этой инструкции модель решает, какие промпты подходят к текущей сцене.</p>
-                        <textarea id="st-auto-notes-selector" class="text_pole" data-field="selectorPrompt" rows="4" aria-describedby="st-auto-notes-selector-help"></textarea>
-                    </div>
-                    <div class="st-auto-notes__connection-test">
-                        <button type="button" class="menu_button" data-field="testButton">Проверить подключение</button>
-                        <p class="st-auto-notes__status" data-field="testStatus" role="status"></p>
-                    </div>
+                        <details class="st-auto-notes__settings-group">
+                            <summary>Подключение</summary>
+                            <div class="st-auto-notes__settings-content">
+                                <label class="st-auto-notes__field">
+                                    Профиль для подсказок
+                                    <select class="text_pole" data-field="profile"></select>
+                                </label>
+                                <p class="st-auto-notes__help">Модель из этого профиля пишет подсказки. Источник векторов задаётся в Vector Storage.</p>
+                                <button type="button" class="menu_button" data-field="testButton">Проверить подключение</button>
+                                <p class="st-auto-notes__status" data-field="testStatus" role="status"></p>
+                            </div>
+                        </details>
+                        <details class="st-auto-notes__settings-group">
+                            <summary>Частота и контекст</summary>
+                            <div class="st-auto-notes__settings-content">
+                                <label class="st-auto-notes__field">
+                                    Проверять раз в N постов
+                                    <input type="number" class="text_pole" data-field="activationEvery" min="1" step="1" inputmode="numeric" aria-describedby="st-auto-notes-activation-help">
+                                </label>
+                                <p class="st-auto-notes__help" id="st-auto-notes-activation-help">Считаются новые посты игрока. 1 — проверять каждый пост.</p>
+                                <label class="st-auto-notes__field">
+                                    Последних постов читать
+                                    <input type="number" class="text_pole" data-field="historyCount" min="1" step="1" inputmode="numeric">
+                                </label>
+                            </div>
+                        </details>
+                        <details class="st-auto-notes__settings-group">
+                            <summary>Отбор правил</summary>
+                            <div class="st-auto-notes__settings-content">
+                                <label class="st-auto-notes__field">
+                                    Способ отбора
+                                    <select class="text_pole" data-field="mode"></select>
+                                </label>
+                                <label class="st-auto-notes__field">
+                                    Макс. промптов за ход
+                                    <input type="number" class="text_pole" data-field="maxPrompts" min="1" step="1" inputmode="numeric">
+                                </label>
+                                <div data-field="vectorOptions">
+                                    <p class="st-auto-notes__help">Поиск использует источник из Vector Storage. Если поле «Когда срабатывает» пустое, поиск идёт по тексту правила.</p>
+                                    <label class="st-auto-notes__field">
+                                        Порог совпадения
+                                        <input type="number" class="text_pole" data-field="vectorThreshold" min="0" max="1" step="0.01" inputmode="decimal">
+                                    </label>
+                                    <p class="st-auto-notes__help">Выше порог — меньше совпадений.</p>
+                                </div>
+                                <div data-field="selectorOptions">
+                                    <label class="st-auto-notes__field" for="st-auto-notes-selector">Общий промпт отбора</label>
+                                    <p id="st-auto-notes-selector-help" class="st-auto-notes__help">По этой инструкции модель решает, какие промпты подходят к текущей сцене.</p>
+                                    <textarea id="st-auto-notes-selector" class="text_pole" data-field="selectorPrompt" rows="4" aria-describedby="st-auto-notes-selector-help"></textarea>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="st-auto-notes__settings-group">
+                            <summary>Перегенерация</summary>
+                            <div class="st-auto-notes__settings-content">
+                                <label class="st-auto-notes__toggle">
+                                    <input type="checkbox" data-field="reuseNotes">
+                                    Сохранять подсказки при перегенерации
+                                </label>
+                                <p class="st-auto-notes__help">Готовые подсказки используются повторно на свайпах и при перегенерации того же хода. При выключении перегенерация идёт без подсказок.</p>
+                            </div>
+                        </details>
                     </div>
                 </details>
-                    <div class="st-auto-notes__json-actions">
-                        <button type="button" class="menu_button" data-field="importJson">Импорт</button>
-                        <button type="button" class="menu_button" data-field="exportJson">Экспорт</button>
-                    </div>
-                    <details class="st-auto-notes__tag-manager">
-                        <summary>Настроить теги</summary>
-                        <div data-field="tagEditor"></div>
-                        <div class="st-auto-notes__tag-edit">
-                            <input type="color" data-field="tagColor" value="#b78bb3" aria-label="Цвет нового тега">
-                            <input type="text" class="text_pole" data-field="tagName" placeholder="Название тега" aria-label="Название нового тега">
-                            <button type="button" class="menu_button" data-field="addTag">+ Тег</button>
-                        </div>
-                    </details>
-                    </div>
-                </details>
-                <details class="st-auto-notes__section" open>
+                <details class="st-auto-notes__section">
                     <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Промпты для заметок</span></summary>
                     <div class="st-auto-notes__section-content">
                     <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
+                                <div class="st-auto-notes__json-actions">
+                                    <button type="button" class="menu_button" data-field="importJson">Импорт</button>
+                                    <button type="button" class="menu_button" data-field="exportJson">Экспорт</button>
+                                </div>
 
                     <p class="st-auto-notes__help">При одинаковом приоритете первым выбирается промпт выше в списке.</p>
-                    <div class="st-auto-notes__tag-filters" data-field="tagFilters" role="group" aria-label="Фильтр по тегам"></div>
+                    <div class="st-auto-notes__tag-bar">
+                        <div class="st-auto-notes__tag-filters" data-field="tagFilters" role="group" aria-label="Фильтр по тегам" tabindex="0"></div>
+                        <button type="button" class="st-auto-notes__tag-settings-button" data-field="tagSettingsButton" aria-label="Редактировать теги" title="Редактировать теги" aria-pressed="false">✏️</button>
+                    </div>
+                    <div class="st-auto-notes__tag-add-row">
+                        <button type="button" class="st-auto-notes__tag-add-button" data-field="addTag" aria-label="Добавить тег" title="Добавить тег">+</button>
+                    </div>
 
-                    <div class="st-auto-notes__prompts" data-field="prompts"></div>
+                    <div class="st-auto-notes__prompts" data-field="prompts" tabindex="0" role="region" aria-label="Список промптов"></div>
                     <p class="st-auto-notes__help" data-field="filterEmpty" hidden>С этим тегом пока нет записей.</p>
                     <p class="st-auto-notes__help" data-field="empty">Добавь правило, которое модель сможет применить к сцене.</p>
                     </div>
@@ -1344,6 +1430,20 @@ function mount() {
     }));
     ui.testButton.addEventListener('click', testConnection);
     ui.importJson.addEventListener('click', showImportDialog);
+    ui.tagSettingsButton.addEventListener('click', () => {
+        editingTags = !editingTags;
+        ui.tagSettingsButton.setAttribute('aria-pressed', String(editingTags));
+        ui.tagSettingsButton.title = editingTags ? 'Завершить редактирование тегов' : 'Редактировать теги';
+        renderPrompts();
+    });
+    ui.tagFilters.addEventListener('wheel', event => {
+        const strip = ui.tagFilters;
+        if (strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+        const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1;
+        const before = strip.scrollLeft;
+        strip.scrollLeft += event.deltaY * unit;
+        if (strip.scrollLeft !== before) event.preventDefault();
+    }, { passive: false });
     ui.exportJson.addEventListener('click', exportProfile);
     ui.mode.replaceChildren(...Object.entries(VECTOR_MODES).map(([value, label]) => new Option(label, value)));
     ui.mode.addEventListener('change', () => {
@@ -1372,20 +1472,7 @@ function mount() {
     ui.selectorPrompt.addEventListener('input', () => editSettings(ui.key, settings => {
         settings.selectorPrompt = ui.selectorPrompt.value;
     }));
-    ui.addTag.addEventListener('click', () => {
-        const name = ui.tagName.value.trim();
-        if (!name) { ui.tagName.focus(); return; }
-        editSettings(ui.key, settings => {
-            settings.tags ??= [];
-            settings.tags.push({ id: globalThis.crypto.randomUUID(), name, color: ui.tagColor.value });
-        });
-        ui.tagName.value = '';
-        renderTagEditor();
-        renderPrompts();
-    });
-    ui.tagName.addEventListener('keydown', event => {
-        if (event.key === 'Enter') { event.preventDefault(); ui.addTag.click(); }
-    });
+    ui.addTag.addEventListener('click', showAddTagDialog);
     ui.add.addEventListener('click', () => {
         let index;
         editSettings(ui.key, settings => {
