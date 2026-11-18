@@ -1,12 +1,12 @@
 const SETTINGS_KEY = 'stAutoNotes';
-const EXTENSION_VERSION = '1.4.1';
+const EXTENSION_VERSION = '1.5.0';
 const UPDATE_SEEN_KEY = 'stAutoNotesUpdateSeen';
 const RELEASE_NOTES = [
-    'Свёрнутые записи. Промпты закрыты по умолчанию, теги видны в заголовках. Нажми на заголовок, чтобы редактировать запись.',
-    'Кнопки JSON. Под «Добавить промпт» расположены «Дополнить JSON», «Переписать JSON» и «Скачать JSON».',
-    'Сворачиваемые разделы. Нажми на заголовок «Настройки чата», «Как отбирать правила» или «Промпты для заметок», чтобы скрыть или раскрыть содержимое.',
-    'Оформление обновлений. Окно использует цвета, шрифт и рамки активной темы SillyTavern.',
-    'Кнопка «Понятно» закрывает окно обновлений. Открытые панели и разделы сохраняют своё состояние.',
+    'Импорт в одном окне. Нажми «Импорт», выбери JSON и переключи «Заменить / Добавить». Под переключателем показано, как загрузится профиль.',
+    'Подтверждение замены появляется только при наличии старых промптов. Нажми «Импортировать», затем «Да», чтобы заменить их, или «Нет», чтобы вернуться к выбору.',
+    'Настройки. Импорт, экспорт, проверка подключения и управление тегами собраны в разделе «Настройки».',
+    'Отладка. Открой раздел «Отладка», чтобы увидеть последние выбранные правила, тексты подсказок и подтверждение включения в собранный запрос.',
+    'Сохранение подсказок. Свайпы и перегенерации используют готовые подсказки того же хода. Переключатель «Сохранять подсказки при перегенерации» находится в настройках.',
 ];
 let updateNoticeOpen = false;
 const INJECTION_KEY = 'zz_st_auto_notes';
@@ -206,6 +206,7 @@ function moveChatSettings({ avatarId, groupId, oldFileName, newFileName }) {
 }
 
 function clearInjection(context = getContext()) {
+    pendingInjection = undefined;
     delete context.extensionPrompts[INJECTION_KEY];
 }
 
@@ -349,25 +350,117 @@ async function generateNotes(service, profileId, prompts, history, signal) {
         await Promise.all(Array.from({ length: Math.min(prompts.length, MAX_PARALLEL_REQUESTS) }, worker));
     });
 
-    return Array.from(notes).sort(([a], [b]) => a - b).map(([, text]) => text);
+    return Array.from(notes).sort(([a], [b]) => a - b).map(([id, text]) => ({ id, text }));
+}
+
+const debugRuns = new Map();
+let pendingInjection;
+
+function noteAnchor(context) {
+    const lastUser = context.chat.findLastIndex(message => message.is_user && isDialoguePost(message));
+    if (lastUser < 0) return '';
+    return String(vectorHash(JSON.stringify(context.chat.slice(0, lastUser + 1)
+        .filter(isDialoguePost).map(message => [Boolean(message.is_user), message.mes]))));
+}
+
+function updateDebug(key, values) {
+    debugRuns.set(key, { ...debugRuns.get(key), ...values });
+    if (ui?.key === key) renderDebug();
+}
+
+function renderDebug() {
+    if (!ui?.debugBody) return;
+    const run = debugRuns.get(ui.key);
+    ui.debugBody.replaceChildren();
+    if (!run) {
+        ui.debugBody.textContent = 'Проверок в этом чате ещё не было.';
+        return;
+    }
+    const heading = document.createElement('p');
+    heading.textContent = new Date(run.time).toLocaleString() + (run.reused ? ' · сохранённые подсказки' : '');
+    const status = document.createElement('p');
+    status.textContent = run.status ?? 'Подготовка…';
+    const delivery = document.createElement('p');
+    delivery.textContent = run.delivery ?? 'Включение в запрос ещё не проверено.';
+    ui.debugBody.append(heading, status, delivery);
+    for (const prompt of run.selected ?? []) {
+        const item = document.createElement('details');
+        item.className = 'st-auto-notes__debug-item';
+        const title = document.createElement('summary');
+        title.textContent = 'Промпт ' + prompt.id;
+        const rule = document.createElement('p');
+        rule.className = 'st-auto-notes__debug-text';
+        rule.textContent = prompt.text;
+        const note = document.createElement('p');
+        note.className = 'st-auto-notes__debug-text';
+        note.textContent = run.notes?.find(note => note.id === prompt.id)?.text ?? 'Подсказка не получена.';
+        item.append(title, rule, note);
+        ui.debugBody.append(item);
+    }
+}
+
+function requestContainsNotes(data, notes) {
+    const strings = [];
+    const pending = [data];
+    const seen = new Set();
+    while (pending.length) {
+        const value = pending.pop();
+        if (typeof value === 'string') strings.push(value);
+        else if (value && typeof value === 'object' && !seen.has(value)) {
+            seen.add(value);
+            pending.push(...Object.values(value));
+        }
+    }
+    return notes.every(note => {
+        const text = getContext().substituteParams(note.text);
+        return strings.some(value => value.includes(text));
+    });
+}
+
+function recordPreparedNotes(data, dryRun) {
+    if (dryRun || !pendingInjection) return;
+    const { key, notes } = pendingInjection;
+    if (chatKey(getContext()) !== key) return;
+    updateDebug(key, {
+        delivery: requestContainsNotes(data, notes)
+            ? 'Включение в собранный запрос подтверждено.'
+            : 'Подсказки не найдены в собранном запросе.',
+    });
 }
 
 function injectNotes(context, notes) {
     if (!notes.length) return;
-    const block = ['[Автозаметки]', ...notes, '[/Автозаметки]'].join('\n\n');
+    const block = ['[Автозаметки]', ...notes.map(note => note.text), '[/Автозаметки]'].join('\n\n');
     context.setExtensionPrompt(INJECTION_KEY, block, IN_CHAT, 0, false, SYSTEM);
+    pendingInjection = { key: chatKey(context), notes };
 }
 
 globalThis.stAutoNotesBeforePrompt = async function (_chat, _contextSize, abortGeneration, type) {
     const context = getContext();
     clearInjection(context);
-    if (type != null && type !== 'normal') return;
+    if (type != null && !['normal', 'swipe', 'regenerate'].includes(type)) return;
 
     const key = chatKey(context);
     const settings = chatSettings(context, key);
     const turn = pendingPost;
     pendingPost = undefined;
     if (!settings?.enabled || !settings.profileId) return;
+
+    if (type === 'swipe' || type === 'regenerate' || groupTurn?.reroll) {
+        const saved = settings.lastNotes;
+        if (settings.reuseNotes !== false && saved?.anchor === noteAnchor(context) && saved.notes?.length) {
+            updateDebug(key, {
+                time: Date.now(), selected: saved.selected, notes: saved.notes, reused: true,
+                status: 'Используются подсказки предыдущего ответа.',
+                delivery: 'Ожидается сборка запроса.',
+            });
+            injectNotes(context, saved.notes);
+        } else {
+            setStatus(key, 'Перегенерация без сохранённых подсказок.');
+            if (debugRuns.has(key)) updateDebug(key, { delivery: 'Текущая перегенерация идёт без подсказок.' });
+        }
+        return;
+    }
 
     const group = groupTurn?.key === key ? groupTurn : undefined;
     if (group?.notes) {
@@ -385,6 +478,10 @@ globalThis.stAutoNotesBeforePrompt = async function (_chat, _contextSize, abortG
             return;
         }
     }
+    updateDebug(key, {
+        time: Date.now(), selected: [], notes: [], reused: false,
+        status: 'Отбор правил…', delivery: 'Ожидается генерация подсказок.',
+    });
     const service = context.ConnectionManagerRequestService;
     const { profileId } = settings;
     if (!supportedProfiles(context).some(profile => profile.id === profileId)) {
@@ -432,6 +529,9 @@ globalThis.stAutoNotesBeforePrompt = async function (_chat, _contextSize, abortG
             .filter(prompt => prompt.text);
         selected = await selectPrompts(service, profileId, candidates, history, instruction, limit, controller.signal);
     }
+    if (activeBatch === controller && chatKey(getContext()) === key) {
+        updateDebug(key, { selected: (selected ?? []).map(({ id, text }) => ({ id, text })) });
+    }
     let notes = [];
     if (selected?.length && !controller.signal.aborted) {
         setStatus(key, `Готовлю заметки по выбранным промптам: ${selected.length}…`);
@@ -454,6 +554,13 @@ globalThis.stAutoNotesBeforePrompt = async function (_chat, _contextSize, abortG
         return;
     }
 
+    const activated = (selected ?? []).map(({ id, text }) => ({ id, text }));
+    currentSettings.lastNotes = { time: Date.now(), anchor: noteAnchor(current), selected: activated, notes };
+    current.saveSettingsDebounced();
+    updateDebug(key, {
+        notes,
+        delivery: notes.length ? 'Ожидается сборка запроса.' : 'Подсказки для запроса отсутствуют.',
+    });
     if (group && groupTurn === group) group.notes = notes;
     injectNotes(current, notes);
     if (!selected) {
@@ -471,6 +578,10 @@ globalThis.stAutoNotesBeforePrompt = async function (_chat, _contextSize, abortG
 
 function setStatus(key, text) {
     if (ui?.key === key) ui.status.textContent = text;
+    const run = debugRuns.get(key);
+    if (run && !text.startsWith('До проверки правил')) {
+        updateDebug(key, { status: text });
+    }
 }
 
 async function checkVectorConnection(context, signal) {
@@ -820,11 +931,20 @@ function renderChat() {
     ui.maxPrompts.value = settings?.maxPrompts ?? DEFAULT_MAX_PROMPTS;
     ui.historyCount.value = settings?.historyCount ?? DEFAULT_HISTORY_COUNT;
     ui.activationEvery.value = settings?.activationEvery ?? DEFAULT_ACTIVATION_EVERY;
+    ui.reuseNotes.checked = settings?.reuseNotes !== false;
     ui.mode.value = settings?.mode ?? 'vector';
     ui.vectorThreshold.value = settings?.vectorThreshold ?? DEFAULT_VECTOR_THRESHOLD;
     ui.selectorPrompt.value = settings?.selectorPrompt ?? DEFAULT_SELECTOR_PROMPT;
     ui.status.textContent = '';
     renderProfiles(context);
+    if (!debugRuns.has(ui.key) && settings?.lastNotes) {
+        updateDebug(ui.key, {
+            time: settings.lastNotes.time ?? Date.now(), selected: settings.lastNotes.selected,
+            notes: settings.lastNotes.notes, status: 'Сохранённые подсказки последнего хода.',
+            delivery: 'Статус отправки до перезагрузки недоступен.',
+        });
+    }
+    renderDebug();
     renderTagEditor();
     renderMode();
 }
@@ -875,6 +995,10 @@ function parseProfileJson(text) {
             profile[name] = source[name];
         }
     }
+    if (source.reuseNotes !== undefined) {
+        if (typeof source.reuseNotes !== 'boolean') throw new Error('Некорректное поле reuseNotes.');
+        profile.reuseNotes = source.reuseNotes;
+    }
     if (source.enabled !== undefined) {
         if (typeof source.enabled !== 'boolean') throw new Error('Некорректное поле enabled.');
         profile.enabled = source.enabled;
@@ -916,47 +1040,127 @@ function appendProfile(settings, incoming) {
     })));
 }
 
+function createDialog(title) {
+    const previousFocus = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'st-auto-notes st-auto-notes__confirm';
+    // Keep modal interactions inside this dialog instead of reaching ST's drawer handlers.
+    for (const event of ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown', 'keyup']) {
+        dialog.addEventListener(event, event => event.stopPropagation());
+    }
+    const heading = document.createElement('h3');
+    heading.id = 'st-auto-notes-dialog-' + globalThis.crypto.randomUUID();
+    heading.textContent = title;
+    dialog.setAttribute('aria-labelledby', heading.id);
+    dialog.append(heading);
+    const closed = new Promise(resolve => dialog.addEventListener('close', event => {
+        event.stopPropagation();
+        const result = dialog.returnValue;
+        dialog.remove();
+        if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+        resolve(result);
+    }, { once: true }));
+    document.body.append(dialog);
+    return { dialog, closed };
+}
+
 function showNotice(title, paragraphs, buttons) {
-    return new Promise(resolve => {
-        const previousFocus = document.activeElement;
-        const dialog = document.createElement('dialog');
-        dialog.className = 'st-auto-notes st-auto-notes__confirm';
-        // Keep modal interactions inside this dialog instead of reaching ST's drawer handlers.
-        for (const event of ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown', 'keyup']) {
-            dialog.addEventListener(event, event => event.stopPropagation());
-        }
-        const heading = document.createElement('h3');
-        heading.id = 'st-auto-notes-dialog-title';
-        heading.textContent = title;
-        dialog.setAttribute('aria-labelledby', heading.id);
-        dialog.append(heading);
-        for (const text of paragraphs) {
-            const paragraph = document.createElement('p');
-            paragraph.textContent = text;
-            dialog.append(paragraph);
-        }
-        const actions = document.createElement('div');
-        actions.className = 'st-auto-notes__dialog-actions';
-        for (const [value, label] of buttons) {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'menu_button';
-            button.textContent = label;
-            button.addEventListener('click', () => dialog.close(value));
-            actions.append(button);
-        }
-        actions.firstElementChild.autofocus = true;
-        dialog.append(actions);
-        dialog.addEventListener('close', event => {
-            event.stopPropagation();
-            const result = dialog.returnValue;
-            dialog.remove();
-            if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
-            resolve(result);
-        }, { once: true });
-        document.body.append(dialog);
-        dialog.showModal();
+    const { dialog, closed } = createDialog(title);
+    for (const text of paragraphs) {
+        const paragraph = document.createElement('p');
+        paragraph.textContent = text;
+        dialog.append(paragraph);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'st-auto-notes__dialog-actions';
+    for (const [value, label] of buttons) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'menu_button';
+        button.textContent = label;
+        button.addEventListener('click', () => dialog.close(value));
+        actions.append(button);
+    }
+    actions.firstElementChild.autofocus = true;
+    dialog.append(actions);
+    dialog.showModal();
+    return closed;
+}
+
+function showImportDialog() {
+    const key = ui.key;
+    if (!key) return;
+    const { dialog } = createDialog('Импорт JSON');
+    const content = document.createElement('div');
+    content.className = 'st-auto-notes__import-content';
+    content.innerHTML = `
+        <div class="st-auto-notes__file-row">
+            <button type="button" class="menu_button" data-import="choose">Выбрать файл</button>
+            <span data-import="filename">Файл не выбран</span>
+            <input type="file" accept=".json,application/json" data-import="file" hidden>
+        </div>
+        <div class="st-auto-notes__import-mode">
+            <span data-import="replaceLabel">Заменить</span>
+            <label class="st-auto-notes__switch">
+                <input type="checkbox" role="switch" aria-label="Добавить записи вместо замены" data-import="append" checked>
+                <span class="st-auto-notes__switch-track" aria-hidden="true"></span>
+            </label>
+            <span data-import="appendLabel">Добавить</span>
+        </div>
+        <p class="st-auto-notes__import-description" data-import="description" role="status"></p>
+        <p class="st-auto-notes__import-error" data-import="error" role="alert"></p>
+        <div class="st-auto-notes__dialog-actions">
+            <button type="button" class="menu_button" data-import="cancel">Отмена</button>
+            <button type="button" class="menu_button" data-import="submit" disabled>Импортировать</button>
+        </div>`;
+    dialog.append(content);
+    const controls = Object.fromEntries(Array.from(content.querySelectorAll('[data-import]'),
+        element => [element.dataset.import, element]));
+    let busy = false;
+
+    function describeMode() {
+        const append = controls.append.checked;
+        controls.description.textContent = append
+            ? 'Записи и теги из файла добавятся к текущим. Настройки текущего профиля сохранятся.'
+            : 'Записи, теги и настройки текущего профиля будут заменены содержимым JSON.';
+        controls.replaceLabel.dataset.active = String(!append);
+        controls.appendLabel.dataset.active = String(append);
+    }
+
+    controls.choose.autofocus = true;
+    controls.choose.addEventListener('click', () => controls.file.click());
+    controls.file.addEventListener('change', () => {
+        controls.filename.textContent = controls.file.files?.[0]?.name ?? 'Файл не выбран';
+        controls.submit.disabled = !controls.file.files?.length;
+        controls.error.textContent = '';
     });
+    controls.append.addEventListener('change', describeMode);
+    controls.cancel.addEventListener('click', () => dialog.close('cancel'));
+    controls.submit.addEventListener('click', async () => {
+        const file = controls.file.files?.[0];
+        if (!file || busy) return;
+        if (chatKey(getContext()) !== key) {
+            controls.error.textContent = 'Чат изменился. Открой импорт в нужном чате заново.';
+            return;
+        }
+        busy = true;
+        controls.submit.disabled = true;
+        controls.choose.disabled = true;
+        controls.append.disabled = true;
+        controls.error.textContent = '';
+        try {
+            const imported = await importProfile(file, controls.append.checked ? 'append' : 'replace', key,
+                message => { controls.error.textContent = message; }, () => dialog.isConnected);
+            if (imported && dialog.isConnected) dialog.close('imported');
+        } finally {
+            busy = false;
+            controls.submit.disabled = !controls.file.files?.length;
+            controls.choose.disabled = false;
+            controls.append.disabled = false;
+        }
+    });
+    describeMode();
+    dialog.showModal();
 }
 
 function confirmProfileReplacement() {
@@ -982,15 +1186,17 @@ async function showUpdateNotice() {
     }
 }
 
-async function importProfile(file, mode, key) {
+async function importProfile(file, mode, key, reportError = message => setStatus(key, message), isActive = () => true) {
     try {
         const incoming = parseProfileJson(await file.text());
-        if (chatKey(getContext()) !== key) return;
-        if (mode === 'replace' && !await confirmProfileReplacement()) return;
+        if (!isActive() || chatKey(getContext()) !== key) return false;
+        const existing = chatSettings(getContext(), key)?.prompts ?? [];
+        if (mode === 'replace' && existing.length > 0 && !await confirmProfileReplacement()) return false;
         const context = getContext();
-        if (chatKey(context) !== key) return;
+        if (!isActive() || chatKey(context) !== key) return false;
         resetTurn();
         vectorCache.clear();
+        debugRuns.delete(key);
         if (mode === 'replace') {
             incoming.activationStart = countPlayerPosts(context.chat);
             context.extensionSettings[SETTINGS_KEY] ??= {};
@@ -1001,15 +1207,17 @@ async function importProfile(file, mode, key) {
         }
         renderChat();
         setStatus(key, `JSON загружен · записей ${incoming.prompts.length}.`);
+        return true;
     } catch (error) {
-        setStatus(key, error instanceof SyntaxError ? 'Не удалось прочитать JSON. Проверь формат файла.' : error.message);
+        reportError(error instanceof SyntaxError ? 'Не удалось прочитать JSON. Проверь формат файла.' : error.message);
+        return false;
     }
 }
 
 function exportProfile() {
     const settings = chatSettings(getContext(), ui.key);
     if (!settings) return;
-    const { activationStart, ...profile } = settings;
+    const { activationStart, lastNotes, ...profile } = settings;
     const blob = new Blob([JSON.stringify({ version: 1, profile }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1032,7 +1240,7 @@ function mount() {
                 <details class="st-auto-notes__section" open>
                     <summary class="st-auto-notes__section-summary">
                         <span class="st-auto-notes__chat">
-                            <span class="st-auto-notes__section-title">Настройки чата</span>
+                            <span class="st-auto-notes__section-title">Настройки</span>
                             <span class="st-auto-notes__chat-name" data-field="chatName"></span>
                         </span>
                     </summary>
@@ -1060,9 +1268,12 @@ function mount() {
                         </label>
                     </div>
                     <p class="st-auto-notes__help" id="st-auto-notes-activation-help">Считаются новые посты игрока. 1 — проверять каждый пост.</p>
-                    </div>
-                </details>
-                <details class="st-auto-notes__section" open>
+                    <label class="st-auto-notes__toggle">
+                        <input type="checkbox" data-field="reuseNotes">
+                        Сохранять подсказки при перегенерации
+                    </label>
+                    <p class="st-auto-notes__help">Готовые подсказки используются повторно на свайпах и при перегенерации того же хода. При выключении перегенерация идёт без подсказок.</p>
+                <details class="st-auto-notes__section st-auto-notes__nested-settings" open>
                     <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Как отбирать правила</span></summary>
                     <div class="st-auto-notes__section-content">
                     <select class="text_pole" data-field="mode" aria-label="Как отбирать правила"></select>
@@ -1085,17 +1296,10 @@ function mount() {
                     </div>
                     </div>
                 </details>
-                <details class="st-auto-notes__section" open>
-                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Промпты для заметок</span></summary>
-                    <div class="st-auto-notes__section-content">
-                    <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
                     <div class="st-auto-notes__json-actions">
-                        <button type="button" class="menu_button" data-field="importAppend">Дополнить JSON</button>
-                        <button type="button" class="menu_button" data-field="importReplace">Переписать JSON</button>
-                        <button type="button" class="menu_button" data-field="exportJson">Скачать JSON</button>
+                        <button type="button" class="menu_button" data-field="importJson">Импорт</button>
+                        <button type="button" class="menu_button" data-field="exportJson">Экспорт</button>
                     </div>
-                    <p class="st-auto-notes__help">При одинаковом приоритете первым выбирается промпт выше в списке.</p>
-                    <div class="st-auto-notes__tag-filters" data-field="tagFilters" role="group" aria-label="Фильтр по тегам"></div>
                     <details class="st-auto-notes__tag-manager">
                         <summary>Настроить теги</summary>
                         <div data-field="tagEditor"></div>
@@ -1105,10 +1309,24 @@ function mount() {
                             <button type="button" class="menu_button" data-field="addTag">+ Тег</button>
                         </div>
                     </details>
+                    </div>
+                </details>
+                <details class="st-auto-notes__section" open>
+                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Промпты для заметок</span></summary>
+                    <div class="st-auto-notes__section-content">
+                    <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
+
+                    <p class="st-auto-notes__help">При одинаковом приоритете первым выбирается промпт выше в списке.</p>
+                    <div class="st-auto-notes__tag-filters" data-field="tagFilters" role="group" aria-label="Фильтр по тегам"></div>
+
                     <div class="st-auto-notes__prompts" data-field="prompts"></div>
                     <p class="st-auto-notes__help" data-field="filterEmpty" hidden>С этим тегом пока нет записей.</p>
                     <p class="st-auto-notes__help" data-field="empty">Добавь правило, которое модель сможет применить к сцене.</p>
                     </div>
+                </details>
+                <details class="st-auto-notes__section">
+                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Отладка</span></summary>
+                    <div class="st-auto-notes__section-content" data-field="debugBody" aria-live="polite"></div>
                 </details>
                 <p class="st-auto-notes__status" data-field="status" role="status"></p>
             </fieldset>
@@ -1121,20 +1339,11 @@ function mount() {
         editSettings(ui.key, settings => { settings.profileId = ui.profile.value; });
         clearConnectionTest();
     });
+    ui.reuseNotes.addEventListener('change', () => editSettings(ui.key, settings => {
+        settings.reuseNotes = ui.reuseNotes.checked;
+    }));
     ui.testButton.addEventListener('click', testConnection);
-    for (const [button, mode] of [[ui.importAppend, 'append'], [ui.importReplace, 'replace']]) {
-        button.addEventListener('click', () => {
-            const key = ui.key;
-            const picker = document.createElement('input');
-            picker.type = 'file';
-            picker.accept = '.json,application/json';
-            picker.addEventListener('change', () => {
-                const file = picker.files?.[0];
-                if (file) void importProfile(file, mode, key);
-            }, { once: true });
-            picker.click();
-        });
-    }
+    ui.importJson.addEventListener('click', showImportDialog);
     ui.exportJson.addEventListener('click', exportProfile);
     ui.mode.replaceChildren(...Object.entries(VECTOR_MODES).map(([value, label]) => new Option(label, value)));
     ui.mode.addEventListener('change', () => {
@@ -1204,13 +1413,16 @@ globalThis.jQuery(() => {
     });
     if (eventTypes.CHAT_RENAMED) eventSource.on(eventTypes.CHAT_RENAMED, moveChatSettings);
     eventSource.on(eventTypes.GROUP_WRAPPER_STARTED, ({ type }) => {
-        groupTurn = type == null || type === 'normal' ? { key: chatKey(getContext()) } : undefined;
+        groupTurn = [undefined, null, 'normal', 'regenerate', 'swipe'].includes(type)
+            ? { key: chatKey(getContext()), reroll: type === 'regenerate' || type === 'swipe' }
+            : undefined;
     });
     eventSource.on(eventTypes.GROUP_WRAPPER_FINISHED, resetTurn);
     eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
         if (!dryRun) clearInjection();
     });
-    eventSource.on(eventTypes.GENERATE_AFTER_DATA, (_data, dryRun) => {
+    eventSource.on(eventTypes.GENERATE_AFTER_DATA, (data, dryRun) => {
+        recordPreparedNotes(data, dryRun);
         if (!dryRun) clearInjection();
     });
     eventSource.on(eventTypes.GENERATION_STOPPED, resetTurn);

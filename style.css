@@ -418,7 +418,7 @@ dialog.st-auto-notes__confirm {
 
 .st-auto-notes__json-actions {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: .45rem;
     margin-block: .55rem;
 }
@@ -475,4 +475,138 @@ dialog.st-auto-notes__confirm {
 
 .st-auto-notes__prompt-content > .st-auto-notes__card-head {
     justify-content: flex-end;
+}
+
+
+.st-auto-notes__import-content {
+    display: grid;
+    gap: .8rem;
+    margin-block-start: 1rem;
+}
+
+.st-auto-notes__file-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .5rem;
+}
+
+.st-auto-notes__file-row [data-import="filename"] {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: .9em;
+}
+
+.st-auto-notes__import-mode {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: .65rem;
+}
+
+.st-auto-notes__import-mode > span {
+    opacity: .6;
+}
+
+.st-auto-notes__import-mode > span[data-active="true"] {
+    opacity: 1;
+    font-weight: 650;
+}
+
+.st-auto-notes__switch {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    width: 3.5rem;
+    height: 2rem;
+    cursor: pointer;
+}
+
+.st-auto-notes__switch input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.st-auto-notes__switch-track {
+    width: 100%;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--an-chip);
+    border: 1px solid var(--an-line);
+    box-sizing: border-box;
+    pointer-events: none;
+}
+
+.st-auto-notes__switch-track::after {
+    content: '';
+    position: absolute;
+    top: .25rem;
+    left: .25rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    background: var(--an-ink);
+}
+
+.st-auto-notes__switch input:checked + .st-auto-notes__switch-track {
+    background: color-mix(in srgb, var(--an-accent) 50%, var(--an-base));
+}
+
+.st-auto-notes__switch input:checked + .st-auto-notes__switch-track::after {
+    transform: translateX(1.5rem);
+}
+
+.st-auto-notes__switch input:focus-visible + .st-auto-notes__switch-track {
+    outline: 2px solid currentColor;
+    outline-offset: 3px;
+}
+
+.st-auto-notes__switch input:disabled + .st-auto-notes__switch-track {
+    opacity: .5;
+}
+
+.st-auto-notes__import-description {
+    opacity: .65;
+    font-size: .92em;
+    margin: 0;
+    line-height: 1.5;
+}
+
+.st-auto-notes__import-error {
+    margin: 0;
+}
+
+.st-auto-notes__import-error:empty {
+    display: none;
+}
+
+.st-auto-notes__import-content .st-auto-notes__dialog-actions {
+    justify-content: flex-end;
+    margin: 0;
+}
+
+.st-auto-notes__nested-settings {
+    margin-block: .65rem;
+}
+
+.st-auto-notes__debug-item {
+    padding-block: .45rem;
+    border-top: 1px solid var(--an-line);
+}
+
+.st-auto-notes__debug-item summary {
+    cursor: pointer;
+    font-weight: 650;
+}
+
+.st-auto-notes__debug-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: .92em;
+    line-height: 1.55;
 }
