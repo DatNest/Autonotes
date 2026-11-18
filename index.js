@@ -1,11 +1,12 @@
 const SETTINGS_KEY = 'stAutoNotes';
-const EXTENSION_VERSION = '1.4.0';
+const EXTENSION_VERSION = '1.4.1';
 const UPDATE_SEEN_KEY = 'stAutoNotesUpdateSeen';
 const RELEASE_NOTES = [
-    'Два режима загрузки JSON. В «Промптах для заметок» нажми «Загрузить JSON · Дополнить», чтобы добавить записи к текущим.',
-    'Полная замена профиля. Нажми «Загрузить JSON · Переписать», выбери файл и подтверди замену кнопкой «Да». «Нет» отменяет загрузку.',
-    'Перенос профиля. Кнопка «Скачать JSON» сохраняет записи, теги и настройки в файл для загрузки в другом чате.',
-    'Окно обновлений. После обновления открой «Автозаметки», чтобы увидеть новые функции. Нажми «Понятно», чтобы отметить сводку прочитанной.',
+    'Свёрнутые записи. Промпты закрыты по умолчанию, теги видны в заголовках. Нажми на заголовок, чтобы редактировать запись.',
+    'Кнопки JSON. Под «Добавить промпт» расположены «Дополнить JSON», «Переписать JSON» и «Скачать JSON».',
+    'Сворачиваемые разделы. Нажми на заголовок «Настройки чата», «Как отбирать правила» или «Промпты для заметок», чтобы скрыть или раскрыть содержимое.',
+    'Оформление обновлений. Окно использует цвета, шрифт и рамки активной темы SillyTavern.',
+    'Кнопка «Понятно» закрывает окно обновлений. Открытые панели и разделы сохраняют своё состояние.',
 ];
 let updateNoticeOpen = false;
 const INJECTION_KEY = 'zz_st_auto_notes';
@@ -571,6 +572,7 @@ function editSettings(key, edit) {
 
 const DEFAULT_TAG_COLOR = '#b78bb3';
 let selectedTag = '';
+let openPromptIndexes = new Set();
 
 function recordTags(entry, tags) {
     const prompt = readPrompt(entry);
@@ -689,12 +691,16 @@ function renderPrompts(focusIndex) {
         const prompt = readPrompt(entry);
         const tagIds = recordTags(entry, tags);
         if (selectedTag && (selectedTag === '__untagged' ? tagIds.length > 0 : !tagIds.includes(selectedTag))) return;
-        const card = document.createElement('div');
+        const card = document.createElement('details');
         card.className = 'st-auto-notes__card';
         card.dataset.priority = prompt.priority;
         card.innerHTML = `
+            <summary class="st-auto-notes__prompt-summary">
+                <span class="st-auto-notes__prompt-heading">Промпт ${index + 1}</span>
+                <span class="st-auto-notes__summary-tags"></span>
+            </summary>
+            <div class="st-auto-notes__prompt-content">
             <div class="st-auto-notes__card-head">
-                <h4>Промпт ${index + 1}</h4>
                 <button type="button" class="menu_button" aria-label="Удалить промпт ${index + 1}">Удалить</button>
             </div>
             <label class="st-auto-notes__field st-auto-notes__trigger" ${isVector ? '' : 'hidden'}>
@@ -712,7 +718,26 @@ function renderPrompts(focusIndex) {
             <div class="st-auto-notes__record-tags">
                 <span>Теги</span>
                 <div class="st-auto-notes__tag-filters" role="group" aria-label="Теги промпта ${index + 1}"></div>
+            </div>
             </div>`;
+        card.open = openPromptIndexes.has(index) || index === focusIndex;
+        if (card.open) openPromptIndexes.add(index);
+        card.addEventListener('toggle', event => {
+            if (event.target !== card || !card.isConnected) return;
+            if (card.open) openPromptIndexes.add(index);
+            else openPromptIndexes.delete(index);
+        });
+        const summaryTags = card.querySelector('.st-auto-notes__summary-tags');
+        for (const tag of tags.filter(tag => tagIds.includes(tag.id))) {
+            const badge = document.createElement('span');
+            badge.className = 'st-auto-notes__tag';
+            badge.style.setProperty('--an-tag-color', tag.color);
+            const icon = document.createElement('i');
+            icon.className = 'fa-solid fa-tag';
+            icon.setAttribute('aria-hidden', 'true');
+            badge.append(icon, document.createTextNode(tag.name));
+            summaryTags.append(badge);
+        }
         const field = card.querySelector('textarea[id]');
         const trigger = card.querySelector('.st-auto-notes__trigger textarea');
         const priority = card.querySelector('select');
@@ -755,8 +780,12 @@ function renderPrompts(focusIndex) {
         });
         remove.addEventListener('click', () => {
             editSettings(key, settings => settings.prompts.splice(index, 1));
+            openPromptIndexes = new Set([...openPromptIndexes]
+                .filter(value => value !== index)
+                .map(value => value > index ? value - 1 : value));
             const remaining = chatSettings(getContext(), key)?.prompts.length ?? 0;
-            renderPrompts(Math.min(index, remaining - 1));
+            renderPrompts();
+            ui.prompts.querySelector('summary')?.focus();
             if (!remaining) ui.add.focus();
         });
 
@@ -778,6 +807,7 @@ function renderChat() {
     clearConnectionTest();
     ui.key = chatKey(context);
     selectedTag = '';
+    openPromptIndexes.clear();
     ui.tagName.value = '';
     ui.tagColor.value = DEFAULT_TAG_COLOR;
     const settings = chatSettings(context, ui.key);
@@ -888,8 +918,13 @@ function appendProfile(settings, incoming) {
 
 function showNotice(title, paragraphs, buttons) {
     return new Promise(resolve => {
+        const previousFocus = document.activeElement;
         const dialog = document.createElement('dialog');
         dialog.className = 'st-auto-notes st-auto-notes__confirm';
+        // Keep modal interactions inside this dialog instead of reaching ST's drawer handlers.
+        for (const event of ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'keydown', 'keyup']) {
+            dialog.addEventListener(event, event => event.stopPropagation());
+        }
         const heading = document.createElement('h3');
         heading.id = 'st-auto-notes-dialog-title';
         heading.textContent = title;
@@ -900,20 +935,23 @@ function showNotice(title, paragraphs, buttons) {
             paragraph.textContent = text;
             dialog.append(paragraph);
         }
-        const form = document.createElement('form');
-        form.method = 'dialog';
+        const actions = document.createElement('div');
+        actions.className = 'st-auto-notes__dialog-actions';
         for (const [value, label] of buttons) {
             const button = document.createElement('button');
+            button.type = 'button';
             button.className = 'menu_button';
-            button.value = value;
             button.textContent = label;
-            form.append(button);
+            button.addEventListener('click', () => dialog.close(value));
+            actions.append(button);
         }
-        form.firstElementChild.autofocus = true;
-        dialog.append(form);
-        dialog.addEventListener('close', () => {
+        actions.firstElementChild.autofocus = true;
+        dialog.append(actions);
+        dialog.addEventListener('close', event => {
+            event.stopPropagation();
             const result = dialog.returnValue;
             dialog.remove();
+            if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
             resolve(result);
         }, { once: true });
         document.body.append(dialog);
@@ -991,17 +1029,18 @@ function mount() {
         <div class="st-auto-notes__body">
             <p data-field="message">Открой чат, чтобы настроить автозаметки.</p>
             <fieldset data-field="fields">
-                <div class="st-auto-notes__section">
-                    <div class="st-auto-notes__section-head">
-                        <div class="st-auto-notes__chat">
-                            <h3>Настройки чата</h3>
-                            <p class="st-auto-notes__chat-name" data-field="chatName"></p>
-                        </div>
+                <details class="st-auto-notes__section" open>
+                    <summary class="st-auto-notes__section-summary">
+                        <span class="st-auto-notes__chat">
+                            <span class="st-auto-notes__section-title">Настройки чата</span>
+                            <span class="st-auto-notes__chat-name" data-field="chatName"></span>
+                        </span>
+                    </summary>
+                    <div class="st-auto-notes__section-content">
                         <label class="st-auto-notes__toggle">
                             <input type="checkbox" data-field="enabled">
                             Включить в этом чате
                         </label>
-                    </div>
                     <label class="st-auto-notes__field">
                         Профиль подключения
                         <select class="text_pole" data-field="profile"></select>
@@ -1021,12 +1060,12 @@ function mount() {
                         </label>
                     </div>
                     <p class="st-auto-notes__help" id="st-auto-notes-activation-help">Считаются новые посты игрока. 1 — проверять каждый пост.</p>
-                </div>
-                <div class="st-auto-notes__section">
-                    <label class="st-auto-notes__field">
-                        Как отбирать правила
-                        <select class="text_pole" data-field="mode"></select>
-                    </label>
+                    </div>
+                </details>
+                <details class="st-auto-notes__section" open>
+                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Как отбирать правила</span></summary>
+                    <div class="st-auto-notes__section-content">
+                    <select class="text_pole" data-field="mode" aria-label="Как отбирать правила"></select>
                     <div data-field="vectorOptions">
                         <p class="st-auto-notes__help">Поиск использует источник из Vector Storage. Если поле «Когда срабатывает» пустое, поиск идёт по тексту правила.</p>
                         <label class="st-auto-notes__field">
@@ -1044,15 +1083,15 @@ function mount() {
                         <button type="button" class="menu_button" data-field="testButton">Проверить подключение</button>
                         <p class="st-auto-notes__status" data-field="testStatus" role="status"></p>
                     </div>
-                </div>
-                <div class="st-auto-notes__section">
-                    <div class="st-auto-notes__section-head">
-                        <h3>Промпты для заметок</h3>
-                        <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
                     </div>
+                </details>
+                <details class="st-auto-notes__section" open>
+                    <summary class="st-auto-notes__section-summary"><span class="st-auto-notes__section-title">Промпты для заметок</span></summary>
+                    <div class="st-auto-notes__section-content">
+                    <button type="button" class="menu_button" data-field="add">+ Добавить промпт</button>
                     <div class="st-auto-notes__json-actions">
-                        <button type="button" class="menu_button" data-field="importAppend">Загрузить JSON · Дополнить</button>
-                        <button type="button" class="menu_button" data-field="importReplace">Загрузить JSON · Переписать</button>
+                        <button type="button" class="menu_button" data-field="importAppend">Дополнить JSON</button>
+                        <button type="button" class="menu_button" data-field="importReplace">Переписать JSON</button>
                         <button type="button" class="menu_button" data-field="exportJson">Скачать JSON</button>
                     </div>
                     <p class="st-auto-notes__help">При одинаковом приоритете первым выбирается промпт выше в списке.</p>
@@ -1069,7 +1108,8 @@ function mount() {
                     <div class="st-auto-notes__prompts" data-field="prompts"></div>
                     <p class="st-auto-notes__help" data-field="filterEmpty" hidden>С этим тегом пока нет записей.</p>
                     <p class="st-auto-notes__help" data-field="empty">Добавь правило, которое модель сможет применить к сцене.</p>
-                </div>
+                    </div>
+                </details>
                 <p class="st-auto-notes__status" data-field="status" role="status"></p>
             </fieldset>
         </div>`;
@@ -1145,8 +1185,8 @@ function mount() {
         });
         renderPrompts(index);
     });
-    panel.addEventListener('toggle', () => {
-        if (panel.open) {
+    panel.addEventListener('toggle', event => {
+        if (event.target === panel && panel.open) {
             renderProfiles();
             void showUpdateNotice();
         }
